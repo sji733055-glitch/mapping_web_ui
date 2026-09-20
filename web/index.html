@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#071011" />
+    <meta
+      name="description"
+      content="Small Point-LIO 实时三维建图控制台"
+    />
+    <title>MAS 建图控制台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">MAS · MAPPING SYSTEM</p>
+            <h1>三维建图控制台</h1>
+          </div>
+        </div>
+        <nav class="surface-tabs" aria-label="控制台工作区">
+          <button class="surface-tab is-active" id="mapping-tab" type="button" aria-controls="mapping-workspace" aria-selected="true">实时建图</button>
+          <button class="surface-tab" id="editor-tab" type="button" aria-controls="editor-workspace" aria-selected="false">地图编辑</button>
+        </nav>
+        <div class="header-status">
+          <span class="connection-pill is-offline" id="connection-pill">
+            <span class="status-dot"></span>
+            <span id="connection-label">正在连接</span>
+          </span>
+          <span class="clock" id="clock">--:--:--</span>
+        </div>
+      </header>
+
+      <div class="main-surfaces">
+      <main class="workspace" id="mapping-workspace">
+        <section class="viewer-card" aria-label="三维累计点云">
+          <div class="viewer-heading">
+            <div>
+              <p class="section-kicker">LIVE POINT CLOUD</p>
+              <h2>累计点云</h2>
+            </div>
+            <div class="viewer-tools" aria-label="视图控制">
+              <button class="tool-button" id="top-view-button" type="button">俯视</button>
+              <button class="tool-button" id="fit-view-button" type="button">适应视图</button>
+            </div>
+          </div>
+
+          <div class="canvas-wrap" id="canvas-wrap">
+            <canvas id="cloud-canvas" aria-label="三维累计点云视图"></canvas>
+            <div class="viewer-empty" id="viewer-empty">
+              <div class="radar-icon" aria-hidden="true">
+                <span class="radar-sweep"></span>
+                <span class="radar-core"></span>
+              </div>
+              <strong id="empty-title">等待建图数据</strong>
+              <span id="empty-copy">启动后，累计点云将在这里实时更新</span>
+            </div>
+            <div class="axis-legend" aria-hidden="true">
+              <span class="axis-x">X</span><span class="axis-y">Y</span><span class="axis-z">Z</span>
+            </div>
+            <div class="viewer-stats">
+              <span>显示 <b id="visible-points">0</b> 点</span>
+              <span id="frame-id">坐标系 —</span>
+            </div>
+            <div class="height-legend">
+              <span>高度</span>
+              <i></i>
+              <span id="height-range">—</span>
+            </div>
+          </div>
+
+          <div class="viewer-footer">
+            <span>左键旋转</span>
+            <span>右键平移</span>
+            <span>滚轮缩放</span>
+            <span class="live-rate" id="cloud-rate">0.0 Hz</span>
+          </div>
+        </section>
+
+        <aside class="control-rail">
+          <section class="control-card stack-card">
+            <div class="card-title-row compact-card-title">
+              <div>
+                <p class="section-kicker">ROS 2 PIPELINE</p>
+                <h2>建图链路</h2>
+              </div>
+              <span class="state-badge idle" id="stack-badge">未启动</span>
+            </div>
+            <div class="stack-node-list">
+              <div class="health-row">
+                <span><i class="health-dot" id="driver-node-dot"></i>MID360 驱动</span>
+                <b id="driver-node-status">未运行</b>
+              </div>
+              <div class="health-row">
+                <span><i class="health-dot" id="lio-node-dot"></i>Small Point-LIO</span>
+                <b id="lio-node-status">未运行</b>
+              </div>
+              <div class="health-row">
+                <span><i class="health-dot" id="tf-node-dot"></i>机器人 TF</span>
+                <b id="tf-node-status">未运行</b>
+              </div>
+            </div>
+            <div class="stack-actions">
+              <button class="stack-button launch" id="start-stack-button" type="button" disabled>启动建图节点</button>
+              <button class="stack-button shutdown" id="stop-stack-button" type="button" disabled>停止节点</button>
+            </div>
+            <p class="stack-message" id="stack-message">连接后可从网页启动雷达驱动与 LIO</p>
+          </section>
+
+          <section class="control-card session-card">
+            <div class="card-title-row">
+              <div>
+                <p class="section-kicker">SESSION CONTROL</p>
+                <h2>建图会话</h2>
+              </div>
+              <span class="state-badge idle" id="state-badge">待机</span>
+            </div>
+
+            <label class="field-label" for="map-name">地图名称</label>
+            <div class="map-name-field">
+              <span aria-hidden="true">MAP /</span>
+              <input
+                id="map-name"
+                type="text"
+                maxlength="48"
+                autocomplete="off"
+                spellcheck="false"
+                value="venue_map"
+                aria-describedby="map-name-help"
+              />
+            </div>
+            <p class="field-help" id="map-name-help">支持字母、数字、短横线和下划线</p>
+
+            <div class="primary-actions">
+              <button class="primary-button start" id="start-button" type="button" disabled>
+                <span class="button-symbol" aria-hidden="true">▶</span>
+                <span><b>开始建图</b><small>清空并开始累计</small></span>
+              </button>
+              <button class="primary-button stop" id="stop-button" type="button" disabled>
+                <span class="button-symbol" aria-hidden="true">■</span>
+                <span><b>结束并保存</b><small>生成 PCD · PGM · YAML</small></span>
+              </button>
+            </div>
+
+            <button class="text-button" id="reset-button" type="button" disabled>清空当前会话</button>
+            <div class="save-progress" id="save-progress" hidden>
+              <div class="progress-track"><span id="save-progress-bar"></span></div>
+              <span id="save-stage">正在保存…</span>
+            </div>
+          </section>
+
+          <section class="control-card metrics-card">
+            <div class="compact-title-row">
+              <h2>建图进度</h2>
+              <span id="session-time">00:00:00</span>
+            </div>
+            <div class="metrics-grid">
+              <div class="metric primary-metric">
+                <span>累计点数</span>
+                <strong id="point-count">0</strong>
+              </div>
+              <div class="metric">
+                <span>覆盖范围</span>
+                <strong id="map-area">0.0 <small>m²</small></strong>
+              </div>
+              <div class="metric">
+                <span>行驶里程</span>
+                <strong id="travel-distance">0.0 <small>m</small></strong>
+              </div>
+              <div class="metric">
+                <span>地图尺寸</span>
+                <strong id="map-size">0.0 × 0.0 <small>m</small></strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="control-card health-card">
+            <h2>数据链路</h2>
+            <div class="health-row">
+              <span><i class="health-dot" id="lidar-dot"></i>点云输入</span>
+              <b id="lidar-status">未连接</b>
+            </div>
+            <div class="health-row">
+              <span><i class="health-dot" id="odom-dot"></i>里程计</span>
+              <b id="odom-status">未连接</b>
+            </div>
+            <div class="health-row">
+              <span><i class="health-dot" id="storage-dot"></i>输出目录</span>
+              <b id="storage-status">检查中</b>
+            </div>
+          </section>
+
+          <section class="output-card" id="output-card" hidden>
+            <p class="section-kicker">LAST OUTPUT</p>
+            <h2>最近保存</h2>
+            <code id="output-path">—</code>
+            <div class="output-files">
+              <span>PCD</span><span>PGM</span><span>YAML</span>
+            </div>
+          </section>
+        </aside>
+      </main>
+
+      <section class="editor-workspace" id="editor-workspace" aria-label="二维与 terrain 地图编辑器" hidden>
+        <section class="editor-canvas-card">
+          <div class="editor-heading">
+            <div>
+              <p class="section-kicker">MAP EDITOR</p>
+              <h2 id="editor-title">二维地图与 terrain 标注</h2>
+            </div>
+            <div class="editor-heading-tools">
+              <span class="layer-badge" id="editor-layer-badge">未加载</span>
+              <button class="tool-button" id="editor-zoom-out" type="button" aria-label="缩小地图">−</button>
+              <button class="tool-button" id="editor-zoom-in" type="button" aria-label="放大地图">＋</button>
+              <button class="tool-button" id="editor-fit" type="button">适应视图</button>
+            </div>
+          </div>
+          <div class="map-canvas-wrap" id="map-canvas-wrap">
+            <canvas id="map-editor-canvas" aria-label="二维栅格地图编辑画布"></canvas>
+            <div class="editor-empty" id="editor-empty">
+              <strong>选择一张地图开始编辑</strong>
+              <span>可先修整 PGM 占据图，再生成并标注 terrain msgpack</span>
+            </div>
+          </div>
+          <div class="editor-footer">
+            <span id="editor-coordinate">栅格 —</span>
+            <span id="editor-world-coordinate">世界坐标 —</span>
+            <span id="editor-cell-value">标签 —</span>
+            <span class="editor-dirty" id="editor-dirty">未修改</span>
+          </div>
+        </section>
+
+        <aside class="editor-rail">
+          <section class="control-card editor-source-card">
+            <div class="compact-title-row">
+              <h2>地图文件</h2>
+              <button class="icon-button" id="editor-refresh-maps" type="button" aria-label="刷新地图列表">↻</button>
+            </div>
+            <label class="field-label" for="editor-map-select">项目 data/map</label>
+            <select id="editor-map-select" class="editor-select">
+              <option value="">正在读取地图…</option>
+            </select>
+            <div class="editor-source-actions">
+              <button class="stack-button editor-load-button" id="editor-load-occupancy" type="button" disabled>编辑二维 PGM</button>
+              <button class="stack-button editor-terrain-button" id="editor-open-terrain" type="button" disabled>打开 terrain</button>
+            </div>
+            <button class="convert-button" id="editor-convert" type="button" disabled>
+              <b>生成 terrain MSG</b>
+              <span>按占据阈值转换并进入语义标注</span>
+            </button>
+            <p class="editor-source-note" id="editor-source-note">保存的 PGM/YAML 会自动出现在这里。</p>
+          </section>
+
+          <section class="control-card editor-tools-card">
+            <div class="compact-title-row"><h2>编辑工具</h2><span id="editor-zoom-label">100%</span></div>
+            <div class="segmented-tools" role="group" aria-label="编辑模式">
+              <button class="is-active" type="button" data-editor-tool="brush">笔刷</button>
+              <button type="button" data-editor-tool="rect">矩形</button>
+              <button type="button" data-editor-tool="line">画线</button>
+              <button type="button" data-editor-tool="pan">平移</button>
+            </div>
+            <label class="range-row" for="editor-brush-size">
+              <span>笔刷大小</span>
+              <input id="editor-brush-size" type="range" min="1" max="30" value="3" />
+              <output id="editor-brush-output">3 px</output>
+            </label>
+            <div class="editor-undo-row">
+              <button class="tool-button" id="editor-undo" type="button" disabled>撤销 Ctrl+Z</button>
+              <span id="editor-history-label">0 步</span>
+            </div>
+          </section>
+
+          <section class="control-card editor-label-card">
+            <h2>栅格标签</h2>
+            <div class="label-palette" id="editor-label-palette" role="radiogroup" aria-label="栅格标签"></div>
+          </section>
+
+          <section class="control-card editor-direction-card" id="editor-direction-card">
+            <div class="compact-title-row"><h2>通过方向</h2><span id="editor-direction-value">90° · 64</span></div>
+            <input id="editor-direction" type="range" min="0" max="255" value="64" disabled />
+            <div class="direction-preview" aria-hidden="true"><i id="editor-direction-arrow">➜</i></div>
+            <label class="check-row"><input id="editor-show-arrows" type="checkbox" checked /> 显示方向箭头</label>
+            <p>画线模式会自动采用线段左侧法向；笔刷和矩形使用上方设定值。</p>
+          </section>
+
+          <section class="control-card editor-save-card">
+            <button class="primary-save-button" id="editor-save" type="button" disabled>保存当前图层</button>
+            <p id="editor-save-status">尚未加载地图</p>
+          </section>
+        </aside>
+      </section>
+      </div>
+
+      <footer class="statusbar">
+        <span id="backend-address">后端 ws://—</span>
+        <span class="status-message" id="status-message">正在连接建图服务…</span>
+        <span>Voxel <b id="voxel-size">—</b></span>
+      </footer>
+    </div>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <script src="/point-cloud-viewer.js"></script>
+    <script src="/app.js"></script>
+    <script src="/map-editor.js"></script>
+  </body>
+</html>

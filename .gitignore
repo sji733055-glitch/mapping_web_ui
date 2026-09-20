@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ros/
+data/pcd/*.pcd
+data/map/*.pgm
+data/map/*.yaml
+!data/pcd/.gitkeep
+!data/map/.gitkeep
