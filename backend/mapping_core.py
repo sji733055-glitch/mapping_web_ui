@@ -165,6 +165,47 @@ def write_binary_pcd(path: Path, points: np.ndarray) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def read_binary_pcd(path: Path) -> np.ndarray:
+    """Read the binary PointXYZ PCD files produced by this application."""
+    path = Path(path)
+    with path.open("rb") as stream:
+        header: dict[str, list[str]] = {}
+        while True:
+            line = stream.readline()
+            if not line:
+                raise ValueError(f"PCD 文件头不完整：{path.name}")
+            try:
+                text = line.decode("ascii").strip()
+            except UnicodeDecodeError as error:
+                raise ValueError(f"PCD 文件头不是 ASCII：{path.name}") from error
+            if not text or text.startswith("#"):
+                continue
+            fields = text.split()
+            key = fields[0].upper()
+            header[key] = fields[1:]
+            if key == "DATA":
+                break
+        if header.get("DATA") != ["binary"]:
+            raise ValueError("坐标系设置仅支持本工具生成的 binary PCD")
+        if header.get("FIELDS") != ["x", "y", "z"]:
+            raise ValueError("坐标系设置仅支持仅含 x/y/z 的 PCD")
+        if header.get("SIZE") != ["4", "4", "4"] or header.get("TYPE") != ["F", "F", "F"]:
+            raise ValueError("PCD x/y/z 必须是 float32")
+        if header.get("COUNT", ["1", "1", "1"]) != ["1", "1", "1"]:
+            raise ValueError("PCD x/y/z COUNT 必须为 1")
+        try:
+            count = int(header["POINTS"][0])
+        except (KeyError, IndexError, ValueError) as error:
+            raise ValueError("PCD 缺少有效的 POINTS 字段") from error
+        if count < 0:
+            raise ValueError("PCD POINTS 不能为负数")
+        raw = stream.read()
+    expected = count * 3 * np.dtype("<f4").itemsize
+    if len(raw) != expected:
+        raise ValueError(f"PCD 数据长度应为 {expected} 字节，实际为 {len(raw)}")
+    return np.frombuffer(raw, dtype="<f4").reshape(count, 3).copy()
+
+
 def _radius_filter(points: np.ndarray, radius: float, minimum: int) -> np.ndarray:
     if radius <= 0 or minimum <= 1 or len(points) < minimum:
         return points

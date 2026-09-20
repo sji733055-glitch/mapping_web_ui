@@ -37,6 +37,7 @@ from std_srvs.srv import Trigger
 
 try:
     from .mapping_core import MapExportConfig, VoxelAccumulator, export_session, sanitize_map_name
+    from .map_frame_core import align_map_frame, initialize_frame_metadata, map_frame_status
     from .terrain_core import (
         EDITOR_HEADER,
         MAX_EDITOR_CELLS,
@@ -54,6 +55,7 @@ try:
     )
 except ImportError:
     from mapping_core import MapExportConfig, VoxelAccumulator, export_session, sanitize_map_name
+    from map_frame_core import align_map_frame, initialize_frame_metadata, map_frame_status
     from terrain_core import (
         EDITOR_HEADER,
         MAX_EDITOR_CELLS,
@@ -592,7 +594,14 @@ class MappingSupervisor(Node):
                     self._save_progress = value
                     self._save_stage = stage
 
-            result = export_session(self.output_root, name, points, self.export_config, progress)
+            with self._map_file_lock:
+                result = export_session(self.output_root, name, points, self.export_config, progress)
+                frame_path = initialize_frame_metadata(
+                    self.output_root,
+                    name,
+                    self._frame_id or "odom",
+                )
+                result["frame_metadata"] = str(frame_path)
             with self._state_lock:
                 self._output = result
                 self._state = "SAVED"
@@ -644,7 +653,29 @@ class MappingSupervisor(Node):
 
     def editable_maps(self) -> list[dict[str, Any]]:
         with self._map_file_lock:
-            return list_editable_maps(self.output_root)
+            maps = list_editable_maps(self.output_root)
+            for entry in maps:
+                entry.update(map_frame_status(self.output_root, entry["name"]))
+            return maps
+
+    def set_map_frame(
+        self,
+        map_name: str,
+        origin_x: float,
+        origin_y: float,
+        heading_yaw: float,
+    ) -> dict[str, Any]:
+        with self._state_lock:
+            if self._state in {"MAPPING", "SAVING"}:
+                raise RuntimeError("建图或保存进行中，不能修改已保存地图的坐标系")
+        with self._map_file_lock:
+            return align_map_frame(
+                self.output_root,
+                map_name,
+                origin_x,
+                origin_y,
+                heading_yaw,
+            )
 
     def load_editor_map(self, map_name: str, layer: int) -> bytes:
         name = sanitize_map_name(map_name)
@@ -796,6 +827,33 @@ class RequestHandler(SimpleHTTPRequestHandler):
             except FileNotFoundError as error:
                 self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "message": str(error)})
             except (OSError, ValueError, json.JSONDecodeError) as error:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": str(error)})
+            return
+        if request_path == "/api/editor/frame":
+            try:
+                payload = self._read_json_body()
+                result = self.server.controller.set_map_frame(
+                    str(payload.get("map_name", "")),
+                    float(payload.get("origin_x")),
+                    float(payload.get("origin_y")),
+                    float(payload.get("heading_yaw")),
+                )
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "message": (
+                            f"{result['map_name']} 已统一到 map 坐标系；"
+                            f"PCD、二维图{'+ terrain' if result['terrain_transformed'] else ''} 已同步变换"
+                        ),
+                        "frame": result,
+                    },
+                )
+            except RuntimeError as error:
+                self._send_json(HTTPStatus.CONFLICT, {"ok": False, "message": str(error)})
+            except FileNotFoundError as error:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "message": str(error)})
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": str(error)})
             return
         if request_path == "/api/editor/save":

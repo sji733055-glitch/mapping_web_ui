@@ -1,5 +1,15 @@
 # Change history
 
+## 2026-09-20 — 成组统一 map 坐标系并支持拖拽取帧
+
+- 新增“map 坐标系”工作区卡片：在二维图上定义新 `map` 原点与 `map +X`，应用时对同名完整 PCD 施加同一二维刚体变换，把 PGM/YAML 与已有 terrain 最近邻重采样到 `yaw=0` 的轴对齐栅格并同步旋转 terrain 方向；涉及 `web/index.html`、`web/styles.css`、`web/map-editor.js`、`web/app.js` 与新增的 `backend/map_frame_core.py`。
+- 取帧交互支持三种手势：空白处按下＝该点成为新原点并拖出 `+X`；拖动原点圆圈＝平移且保持朝向；拖动 `+X` 箭头＝只转向且保持原点。手柄在画布上以圆圈和箭头端点显示，悬停时切换 `move`/`grab` 光标，单击手柄不会误改数值，输入框仍可直接键入。此前按下即固定原点、只能靠拖动改朝向，重新定位还会把朝向重置为 0°。
+- `backend/terrain_core.py` 的编辑器协议升级为 `MPE2`（头部新增 `origin_yaw`，读取时兼容旧 `MPE1`），YAML 的 `origin` 读写改为完整 `[x, y, yaw]`，并让 origin 三元组始终以浮点样式回写；`backend/mapping_core.py` 新增 `read_binary_pcd`，仅接受本工具生成的 `x/y/z float32` binary PCD 并校验 `POINTS` 与实际长度。
+- 新增 `POST /api/editor/frame`：`MAPPING`/`SAVING` 期间拒绝执行，PCD、PGM、YAML、terrain、frame 元数据通过备份-回滚事务成组替换，任一失败即恢复原文件；操作记录写入 `<名称>_frame.json`（`source_to_map`/`map_to_source`、`revision`、上次定义与栅格信息），重复定义会在元数据中累计组合。
+- 修正栅格重算精度：变换后的目标栅格改用包围盒精确最小角作为原点、按 `ceil(范围/分辨率)` 取整，不再把原点吸附到分辨率整数倍，因此“原点与朝向都不变”的对齐对 PGM/YAML/PCD 是逐字节空操作，亚栅格平移也不再凭空多出一行一列填充。
+- 新增 `tests/test_map_frame_core.py`（含旧实现会失败的对齐/尺寸回归用例）与 `tests/editor_pointer_harness.mjs`：后者用极简 DOM 桩加载真实 `web/map-editor.js`，在无浏览器、无构建工具的情况下回放取帧的按下、平移、转向手势。`AGENTS.md` 与 `README.md` 同步更新验证命令和手势说明。
+- 验证：`python3 -m compileall -q backend tests`、`python3 -m unittest discover -s tests -v`（10 项）、`node --check web/app.js`、`node --check web/point-cloud-viewer.js`、`node --check web/map-editor.js`、`node tests/editor_pointer_harness.mjs`（11 项）、`bash -n run.sh` 全部通过；把 `venue_map`（189×170、65196 点）复制到隔离目录后实测：恒等对齐保持 189×170 且 PGM/YAML/PCD 逐字节不变，90° 旋转尺寸精确换成 170×189、PCD 与解析解偏差为 0、占用与未知像元数量分别保持 5546/26584，PCD↔PGM 归属 65118/65119 点一致（唯一分歧点恰好落在栅格边界），30° 旋转得到解析预期的 249×242 且 YAML yaw 写为 0；隔离端口 18774 上验证 `/api/status`、`/api/cloud` 的 `MAP1` 头、`/api/maps` 的 frame 字段与 `POST /api/editor/frame` 的 404/400 分支。回归用例均确认能拒绝旧实现。未做真实浏览器检查（本机 `firefox`、`geckodriver` 都是无法在此环境运行的 snap 包，也无图形浏览器），未启动雷达或 LIO 会话；测试用的隔离后端与临时目录已清理，本机 8765 上原有的控制台进程未被触碰，浏览器需刷新以加载新的 `web/map-editor.js`。
+
 ## 2026-09-20 — 启动后自动打开控制台网页
 
 - 更新 `run.sh`：解析 `--host`/`--port` 后启动就绪探测，`/api/status` 可访问时自动打开对应控制台地址；VS Code Remote SSH 优先使用客户端 `code --openExternal`，普通 Linux 桌面依次使用 `xdg-open`、`gio open` 或 `sensible-browser`，无法调用浏览器时保留后端并打印手动访问地址。

@@ -273,6 +273,20 @@
             </div>
           </section>
 
+          <section class="control-card editor-frame-card">
+            <div class="compact-title-row"><h2>map 坐标系</h2><span id="editor-frame-revision">未设置</span></div>
+            <p class="editor-frame-help">定义新 map 原点在当前地图中的位置，并指定 map +X 方向。应用时会同步变换完整 PCD、二维图和已有 terrain。</p>
+            <div class="frame-fields">
+              <label>原点 X / m<input id="editor-frame-x" type="number" step="0.01" value="0" /></label>
+              <label>原点 Y / m<input id="editor-frame-y" type="number" step="0.01" value="0" /></label>
+              <label>+X 朝向 / °<input id="editor-frame-yaw" type="number" step="0.1" value="0" /></label>
+            </div>
+            <button class="tool-button frame-pick-button" id="editor-frame-pick" data-editor-tool="frame" type="button" disabled>在图上拖出原点与 +X</button>
+            <p class="editor-frame-help">激活后：空白处按下＝以该点为新原点并拖出 +X；拖动原点圆圈＝平移且不改朝向；拖动 +X 箭头＝只转向。也可直接填写上方数值。</p>
+            <button class="frame-apply-button" id="editor-frame-apply" type="button" disabled>统一 PCD 与二维图坐标系</button>
+            <p class="editor-frame-note" id="editor-frame-note">需要同时存在同名 PCD 与 PGM/YAML。</p>
+          </section>
+
           <section class="control-card editor-label-card">
             <h2>栅格标签</h2>
             <div class="label-palette" id="editor-label-palette" role="radiogroup" aria-label="栅格标签"></div>

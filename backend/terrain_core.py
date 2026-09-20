@@ -24,8 +24,10 @@ except ImportError:
     from mapping_core import sanitize_map_name
 
 
-EDITOR_MAGIC = b"MPE1"
-EDITOR_HEADER = struct.Struct("<4sB3xIIddd")
+EDITOR_MAGIC = b"MPE2"
+EDITOR_HEADER = struct.Struct("<4sB3xIIdddd")
+LEGACY_EDITOR_MAGIC = b"MPE1"
+LEGACY_EDITOR_HEADER = struct.Struct("<4sB3xIIddd")
 LAYER_OCCUPANCY = 0
 LAYER_TERRAIN = 1
 MAX_EDITOR_CELLS = 16_000_000
@@ -40,6 +42,7 @@ class MapMetadata:
     resolution: float
     origin_x: float = 0.0
     origin_y: float = 0.0
+    origin_yaw: float = 0.0
 
     @property
     def cell_count(self) -> int:
@@ -54,7 +57,7 @@ class MapMetadata:
             )
         if not math.isfinite(self.resolution) or self.resolution <= 0:
             raise ValueError("地图分辨率必须是正数")
-        if not math.isfinite(self.origin_x) or not math.isfinite(self.origin_y):
+        if not all(math.isfinite(value) for value in (self.origin_x, self.origin_y, self.origin_yaw)):
             raise ValueError("地图原点必须是有限数值")
 
 
@@ -101,6 +104,7 @@ def encode_editor_map(editor_map: EditorMap) -> bytes:
         meta.resolution,
         meta.origin_x,
         meta.origin_y,
+        meta.origin_yaw,
     )
     body = editor_map.values.tobytes(order="C")
     if editor_map.direction is not None:
@@ -109,20 +113,29 @@ def encode_editor_map(editor_map: EditorMap) -> bytes:
 
 
 def decode_editor_map(payload: bytes) -> EditorMap:
-    if len(payload) < EDITOR_HEADER.size:
+    if len(payload) < LEGACY_EDITOR_HEADER.size:
         raise ValueError("地图编辑数据头不完整")
-    magic, layer, width, height, resolution, origin_x, origin_y = EDITOR_HEADER.unpack_from(payload)
-    if magic != EDITOR_MAGIC:
+    magic = payload[:4]
+    if magic == EDITOR_MAGIC:
+        if len(payload) < EDITOR_HEADER.size:
+            raise ValueError("地图编辑数据头不完整")
+        magic, layer, width, height, resolution, origin_x, origin_y, origin_yaw = EDITOR_HEADER.unpack_from(payload)
+        header_size = EDITOR_HEADER.size
+    elif magic == LEGACY_EDITOR_MAGIC:
+        magic, layer, width, height, resolution, origin_x, origin_y = LEGACY_EDITOR_HEADER.unpack_from(payload)
+        origin_yaw = 0.0
+        header_size = LEGACY_EDITOR_HEADER.size
+    else:
         raise ValueError("地图编辑数据 magic 不正确")
-    metadata = MapMetadata(width, height, resolution, origin_x, origin_y)
+    metadata = MapMetadata(width, height, resolution, origin_x, origin_y, origin_yaw)
     metadata.validate()
     channels = 1 if layer == LAYER_OCCUPANCY else 2 if layer == LAYER_TERRAIN else 0
     if not channels:
         raise ValueError("未知地图编辑图层")
-    expected = EDITOR_HEADER.size + metadata.cell_count * channels
+    expected = header_size + metadata.cell_count * channels
     if len(payload) != expected:
         raise ValueError(f"地图编辑数据长度应为 {expected} 字节，实际为 {len(payload)}")
-    start = EDITOR_HEADER.size
+    start = header_size
     stop = start + metadata.cell_count
     values = np.frombuffer(payload[start:stop], dtype=np.uint8).copy()
     direction = (
@@ -170,6 +183,45 @@ def read_map_yaml(yaml_path: Path) -> tuple[Path, float, float, float, float, bo
     if image_path.suffix.lower() != ".pgm":
         raise ValueError("网页地图编辑器当前只支持 PGM 图像")
     return image_path, resolution, origin_x, origin_y, occupied, negate
+
+
+def read_map_origin(yaml_path: Path) -> tuple[float, float, float]:
+    """Return the full Nav2 image origin pose as ``x, y, yaw``."""
+    text = Path(yaml_path).resolve().read_text(encoding="utf-8")
+    origin_text = _yaml_scalar(text, "origin", required=False) or "[0, 0, 0]"
+    match = re.fullmatch(r"\[\s*([^,]+),\s*([^,]+),\s*([^]]+)\s*\]", origin_text)
+    if not match:
+        raise ValueError("YAML origin 必须是 [x, y, yaw]")
+    values = tuple(float(match.group(index)) for index in range(1, 4))
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("YAML origin 必须是有限数值")
+    return values
+
+
+def _format_origin_value(value: float) -> str:
+    """Format an origin component compactly while keeping float notation."""
+    text = f"{value:.10g}"
+    if not any(character in text for character in ".eE"):
+        text += ".0"
+    return text
+
+
+def replace_map_origin(yaml_text: str, origin_x: float, origin_y: float, origin_yaw: float = 0.0) -> str:
+    """Replace only the YAML origin line while preserving all other settings."""
+    if not all(math.isfinite(value) for value in (origin_x, origin_y, origin_yaw)):
+        raise ValueError("地图原点必须是有限数值")
+    replacement = f"origin: [{_format_origin_value(origin_x)}, {_format_origin_value(origin_y)}, {_format_origin_value(origin_yaw)}]"
+    updated, count = re.subn(
+        r"^\s*origin\s*:\s*.*?(?:\s+#.*)?$",
+        replacement,
+        yaml_text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count:
+        return updated
+    suffix = "" if yaml_text.endswith("\n") else "\n"
+    return f"{yaml_text}{suffix}{replacement}\n"
 
 
 def read_pgm(path: Path) -> np.ndarray:
@@ -248,13 +300,14 @@ def write_pgm(path: Path, pixels_top_down: np.ndarray) -> None:
 
 def load_occupancy_editor_map(yaml_path: Path) -> EditorMap:
     image_path, resolution, origin_x, origin_y, _occupied, _negate = read_map_yaml(yaml_path)
+    _origin_x, _origin_y, origin_yaw = read_map_origin(yaml_path)
     pixels_top_down = read_pgm(image_path)
     height, width = pixels_top_down.shape
     # Browser/editor arrays use map coordinates: row zero is the bottom row.
     values = np.ascontiguousarray(np.flipud(pixels_top_down).reshape(-1), dtype=np.uint8)
     result = EditorMap(
         LAYER_OCCUPANCY,
-        MapMetadata(width, height, resolution, origin_x, origin_y),
+        MapMetadata(width, height, resolution, origin_x, origin_y, origin_yaw),
         values,
     )
     result.validate()
@@ -266,12 +319,14 @@ def save_occupancy_editor_map(yaml_path: Path, editor_map: EditorMap) -> Path:
     if editor_map.layer != LAYER_OCCUPANCY:
         raise ValueError("保存 PGM 时必须提供二维占据图图层")
     image_path, resolution, origin_x, origin_y, _occupied, _negate = read_map_yaml(yaml_path)
+    _origin_x, _origin_y, origin_yaw = read_map_origin(yaml_path)
     expected = MapMetadata(
         editor_map.metadata.width,
         editor_map.metadata.height,
         resolution,
         origin_x,
         origin_y,
+        origin_yaw,
     )
     if (editor_map.metadata.width, editor_map.metadata.height) != (expected.width, expected.height):
         raise ValueError("不能通过编辑接口改变 PGM 地图尺寸")
@@ -282,6 +337,7 @@ def save_occupancy_editor_map(yaml_path: Path, editor_map: EditorMap) -> Path:
 
 def occupancy_to_terrain(yaml_path: Path) -> EditorMap:
     image_path, resolution, origin_x, origin_y, occupied_thresh, negate = read_map_yaml(yaml_path)
+    _origin_x, _origin_y, origin_yaw = read_map_origin(yaml_path)
     pixels = read_pgm(image_path)
     probability = pixels.astype(np.float32) / 255.0 if negate else (255.0 - pixels) / 255.0
     obstacle_top_down = probability >= occupied_thresh
@@ -290,7 +346,7 @@ def occupancy_to_terrain(yaml_path: Path) -> EditorMap:
     height, width = pixels.shape
     result = EditorMap(
         LAYER_TERRAIN,
-        MapMetadata(width, height, resolution, origin_x, origin_y),
+        MapMetadata(width, height, resolution, origin_x, origin_y, origin_yaw),
         terrain,
         direction,
     )
@@ -421,7 +477,13 @@ class _MessagePackReader:
         raise ValueError(f"不支持的 msgpack 类型 0x{code:02x}")
 
 
-def unpack_terrain_msgpack(payload: bytes, *, origin_x: float = 0.0, origin_y: float = 0.0) -> EditorMap:
+def unpack_terrain_msgpack(
+    payload: bytes,
+    *,
+    origin_x: float = 0.0,
+    origin_y: float = 0.0,
+    origin_yaw: float = 0.0,
+) -> EditorMap:
     reader = _MessagePackReader(payload)
     data = reader.read()
     if reader.offset != len(payload):
@@ -440,7 +502,7 @@ def unpack_terrain_msgpack(payload: bytes, *, origin_x: float = 0.0, origin_y: f
     direction = np.frombuffer(direction_value, dtype=np.uint8).copy() if isinstance(direction_value, bytes) else np.asarray(direction_value, dtype=np.uint8)
     result = EditorMap(
         LAYER_TERRAIN,
-        MapMetadata(width, height, resolution, origin_x, origin_y),
+        MapMetadata(width, height, resolution, origin_x, origin_y, origin_yaw),
         terrain,
         direction,
     )
@@ -449,10 +511,16 @@ def unpack_terrain_msgpack(payload: bytes, *, origin_x: float = 0.0, origin_y: f
 
 
 def load_terrain_editor_map(path: Path, *, yaml_path: Path | None = None) -> EditorMap:
-    origin_x = origin_y = 0.0
+    origin_x = origin_y = origin_yaw = 0.0
     if yaml_path is not None and Path(yaml_path).is_file():
         _image, _resolution, origin_x, origin_y, _occupied, _negate = read_map_yaml(yaml_path)
-    return unpack_terrain_msgpack(Path(path).read_bytes(), origin_x=origin_x, origin_y=origin_y)
+        _origin_x, _origin_y, origin_yaw = read_map_origin(yaml_path)
+    return unpack_terrain_msgpack(
+        Path(path).read_bytes(),
+        origin_x=origin_x,
+        origin_y=origin_y,
+        origin_yaw=origin_yaw,
+    )
 
 
 def write_terrain_msgpack(path: Path, editor_map: EditorMap) -> None:

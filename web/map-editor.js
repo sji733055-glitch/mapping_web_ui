@@ -12,12 +12,16 @@
     loadOccupancy: $("editor-load-occupancy"), openTerrain: $("editor-open-terrain"), convert: $("editor-convert"), sourceNote: $("editor-source-note"),
     brushSize: $("editor-brush-size"), brushOutput: $("editor-brush-output"),
     undo: $("editor-undo"), historyLabel: $("editor-history-label"), palette: $("editor-label-palette"),
+    frameX: $("editor-frame-x"), frameY: $("editor-frame-y"), frameYaw: $("editor-frame-yaw"),
+    framePick: $("editor-frame-pick"), frameApply: $("editor-frame-apply"), frameNote: $("editor-frame-note"), frameRevision: $("editor-frame-revision"),
     directionCard: $("editor-direction-card"), direction: $("editor-direction"), directionValue: $("editor-direction-value"), directionArrow: $("editor-direction-arrow"), showArrows: $("editor-show-arrows"),
     save: $("editor-save"), saveStatus: $("editor-save-status"), coordinate: $("editor-coordinate"), worldCoordinate: $("editor-world-coordinate"), cellValue: $("editor-cell-value"), dirty: $("editor-dirty")
   };
 
-  const MAGIC = "MPE1";
-  const HEADER_SIZE = 40;
+  const MAGIC = "MPE2";
+  const HEADER_SIZE = 48;
+  const FRAME_AXIS_PX = 58;
+  const FRAME_HANDLE_PX = 13;
   const LAYER_OCCUPANCY = 0;
   const LAYER_TERRAIN = 1;
   const MAX_HISTORY_BYTES = 64 * 1024 * 1024;
@@ -44,11 +48,11 @@
 
   const state = {
     maps: [], mapName: "", layer: null, width: 0, height: 0, resolution: 0.05,
-    originX: 0, originY: 0, values: null, direction: null,
+    originX: 0, originY: 0, originYaw: 0, values: null, direction: null,
     dirty: false, busy: false, tool: "brush", label: 0, brushSize: 3, directionValue: 64,
     zoom: 1, panX: 0, panY: 0, hover: null, drag: null, preview: null,
     history: [], historyBytes: 0, renderPending: false, mapImageDirty: true,
-    mapCanvas: document.createElement("canvas"), mapsLoaded: false
+    mapCanvas: document.createElement("canvas"), mapsLoaded: false, frameDraft: null
   };
   const ctx = dom.canvas.getContext("2d", { alpha: false });
   const mapCtx = state.mapCanvas.getContext("2d", { alpha: false });
@@ -91,6 +95,24 @@
     dom.loadOccupancy.disabled = state.busy || !entry?.has_occupancy;
     dom.openTerrain.disabled = state.busy || !entry?.has_terrain;
     dom.convert.disabled = state.busy || !entry?.has_occupancy;
+    const canSetFrame = Boolean(entry?.has_occupancy && entry?.has_pcd && state.values && state.mapName === entry.name);
+    dom.framePick.disabled = state.busy || !canSetFrame;
+    dom.frameApply.disabled = state.busy || !canSetFrame;
+    dom.frameX.disabled = state.busy || !canSetFrame;
+    dom.frameY.disabled = state.busy || !canSetFrame;
+    dom.frameYaw.disabled = state.busy || !canSetFrame;
+    dom.frameRevision.textContent = entry?.has_frame_metadata ? `rev ${entry.frame_revision || 0}` : "未定义";
+    if (!entry?.has_occupancy) {
+      dom.frameNote.textContent = "需要先加载 PGM/YAML。";
+    } else if (!entry?.has_pcd) {
+      dom.frameNote.textContent = "缺少 data/pcd 下的同名 PCD，不能保证成组变换。";
+    } else if (entry.has_frame_metadata) {
+      const transform = entry.source_to_map || {};
+      const yaw = Number(transform.yaw || 0) * 180 / Math.PI;
+      dom.frameNote.textContent = `${entry.source_frame || "odom"} → map：X ${Number(transform.x || 0).toFixed(3)} · Y ${Number(transform.y || 0).toFixed(3)} · ${yaw.toFixed(1)}°`;
+    } else {
+      dom.frameNote.textContent = "当前按 odom 与 map 数值重合处理；可在图上重新定义。";
+    }
     if (!entry) {
       dom.sourceNote.textContent = state.maps.length ? "请选择地图文件。" : "data/map 中还没有可编辑的地图。";
     } else if (entry.error) {
@@ -154,7 +176,7 @@
     if (!channels || buffer.byteLength !== HEADER_SIZE + count * channels) throw new Error("地图通道或数据长度无效");
     return {
       layer, width, height,
-      resolution: view.getFloat64(16, true), originX: view.getFloat64(24, true), originY: view.getFloat64(32, true),
+      resolution: view.getFloat64(16, true), originX: view.getFloat64(24, true), originY: view.getFloat64(32, true), originYaw: view.getFloat64(40, true),
       values: new Uint8Array(buffer.slice(HEADER_SIZE, HEADER_SIZE + count)),
       direction: layer === LAYER_TERRAIN ? new Uint8Array(buffer.slice(HEADER_SIZE + count)) : null
     };
@@ -168,7 +190,7 @@
     for (let index = 0; index < MAGIC.length; index += 1) view.setUint8(index, MAGIC.charCodeAt(index));
     view.setUint8(4, state.layer);
     view.setUint32(8, state.width, true); view.setUint32(12, state.height, true);
-    view.setFloat64(16, state.resolution, true); view.setFloat64(24, state.originX, true); view.setFloat64(32, state.originY, true);
+    view.setFloat64(16, state.resolution, true); view.setFloat64(24, state.originX, true); view.setFloat64(32, state.originY, true); view.setFloat64(40, state.originYaw, true);
     new Uint8Array(buffer, HEADER_SIZE, count).set(state.values);
     if (state.direction) new Uint8Array(buffer, HEADER_SIZE + count, count).set(state.direction);
     return buffer;
@@ -185,9 +207,10 @@
       if (!response.ok) throw await responseError(response);
       const decoded = decodeEditorPayload(await response.arrayBuffer());
       state.mapName = entry.name; state.layer = decoded.layer; state.width = decoded.width; state.height = decoded.height;
-      state.resolution = decoded.resolution; state.originX = decoded.originX; state.originY = decoded.originY;
+      state.resolution = decoded.resolution; state.originX = decoded.originX; state.originY = decoded.originY; state.originYaw = decoded.originYaw;
       state.values = decoded.values; state.direction = decoded.direction; state.dirty = false;
       state.history = []; state.historyBytes = 0; state.hover = null; state.drag = null; state.preview = null;
+      state.frameDraft = null; dom.frameX.value = "0"; dom.frameY.value = "0"; dom.frameYaw.value = "0";
       state.label = decoded.layer === LAYER_OCCUPANCY ? 0 : 1;
       state.mapImageDirty = true;
       buildPalette(); updateEditorUi(); fitMap();
@@ -258,6 +281,149 @@
     }
   }
 
+  function writeFrameDraft(draft) {
+    state.frameDraft = draft;
+    dom.frameX.value = draft.originX.toFixed(3);
+    dom.frameY.value = draft.originY.toFixed(3);
+    let degrees = (draft.heading * 180 / Math.PI) % 360;
+    if (degrees < 0) degrees += 360;
+    if (Number(degrees.toFixed(1)) >= 360) degrees = 0;
+    dom.frameYaw.value = degrees.toFixed(1);
+    scheduleRender();
+  }
+
+  function frameDraft() {
+    return state.frameDraft || { originX: 0, originY: 0, heading: 0 };
+  }
+
+  // Screen-space grab handles so the frame can be moved and turned after it is placed.
+  function frameHandles() {
+    const draft = frameDraft();
+    const origin = worldToScreen(draft.originX, draft.originY);
+    if (!origin) return null;
+    const localHeading = draft.heading - state.originYaw;
+    return {
+      draft, origin,
+      tip: {
+        x: origin.x + Math.cos(localHeading) * FRAME_AXIS_PX,
+        y: origin.y - Math.sin(localHeading) * FRAME_AXIS_PX
+      }
+    };
+  }
+
+  function frameHandleAt(screen) {
+    const handles = frameHandles();
+    if (!handles) return null;
+    const near = (point) => Math.hypot(screen.x - point.x, screen.y - point.y) <= FRAME_HANDLE_PX;
+    if (near(handles.origin)) return "origin";
+    if (near(handles.tip)) return "tip";
+    return null;
+  }
+
+  function setFrameDraft(start, end) {
+    const origin = mapCellToWorld(start.x, start.y);
+    const target = mapCellToWorld(end.x, end.y);
+    const heading = Math.atan2(target.y - origin.y, target.x - origin.x);
+    writeFrameDraft({ originX: origin.x, originY: origin.y, heading });
+  }
+
+  function updateFrameDrag(drag, point) {
+    const target = mapCellToWorld(point.x, point.y);
+    const draft = drag.draft || frameDraft();
+    if (drag.kind === "frame-move") {
+      writeFrameDraft({
+        originX: target.x + drag.offsetX,
+        originY: target.y + drag.offsetY,
+        heading: drag.heading
+      });
+      return;
+    }
+    if (drag.kind === "frame-rotate") {
+      // A click on the arrow head without dragging must not nudge the heading.
+      if (point.x === drag.start.x && point.y === drag.start.y) return;
+      const dx = target.x - draft.originX, dy = target.y - draft.originY;
+      const heading = Math.hypot(dx, dy) < 1e-9 ? draft.heading : Math.atan2(dy, dx);
+      writeFrameDraft({ originX: draft.originX, originY: draft.originY, heading });
+      return;
+    }
+    setFrameDraft(drag.start, point);
+  }
+
+  // Grabbing the origin marker moves the frame; grabbing the +X tip turns it.
+  function beginFrameDrag(screen, point, pointerId) {
+    const grab = frameHandleAt(screen);
+    if (grab === "origin") {
+      const draft = frameDraft();
+      const world = mapCellToWorld(point.x, point.y);
+      state.drag = {
+        kind: "frame-move", pointerId, start: point, last: point, draft,
+        heading: draft.heading, offsetX: draft.originX - world.x, offsetY: draft.originY - world.y
+      };
+      return;
+    }
+    if (grab === "tip") {
+      state.drag = { kind: "frame-rotate", pointerId, start: point, last: point, draft: frameDraft() };
+      return;
+    }
+    state.drag = { kind: "frame", pointerId, start: point, last: point };
+    setFrameDraft(point, point);
+  }
+
+  function updateFrameCursor(screen) {
+    if (state.tool !== "frame") {
+      dom.canvas.classList.remove("is-frame-grabbing", "is-frame-rotating");
+      return;
+    }
+    const grab = state.drag ? state.drag.kind : frameHandleAt(screen);
+    dom.canvas.classList.toggle("is-frame-grabbing", grab === "frame-move" || grab === "origin");
+    dom.canvas.classList.toggle("is-frame-rotating", grab === "frame-rotate" || grab === "tip");
+  }
+
+  function updateFrameDraftFromInputs() {
+    const originX = Number(dom.frameX.value), originY = Number(dom.frameY.value);
+    const heading = Number(dom.frameYaw.value) * Math.PI / 180;
+    if ([originX, originY, heading].every(Number.isFinite)) {
+      state.frameDraft = { originX, originY, heading };
+      scheduleRender();
+    }
+  }
+
+  async function applyMapFrame() {
+    const entry = selectedMap();
+    if (!entry || !state.values || state.mapName !== entry.name || state.busy) return;
+    const originX = Number(dom.frameX.value), originY = Number(dom.frameY.value);
+    const heading = Number(dom.frameYaw.value) * Math.PI / 180;
+    if (![originX, originY, heading].every(Number.isFinite)) {
+      toast("map 原点和朝向必须是有效数字", "error");
+      return;
+    }
+    if (state.dirty && !(await saveCurrent({ quiet: true }))) return;
+    const terrainText = entry.has_terrain ? "、terrain 语义与方向" : "";
+    if (!window.confirm(`将以当前坐标 (${originX.toFixed(3)}, ${originY.toFixed(3)}) 为新 map 原点，并把 +X 设为 ${(heading * 180 / Math.PI).toFixed(1)}°。\n\n完整 PCD、PGM/YAML${terrainText}会成组变换；二维栅格旋转会进行最近邻重采样，操作不能在网页中撤销。确认继续吗？`)) return;
+    const previousLayer = state.layer;
+    state.busy = true; updateSourceControls(); updateEditorUi();
+    dom.saveStatus.textContent = "正在统一 PCD、二维图与 terrain 的 map 坐标系…";
+    try {
+      const response = await fetch("/api/editor/frame", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ map_name: entry.name, origin_x: originX, origin_y: originY, heading_yaw: heading })
+      });
+      if (!response.ok) throw await responseError(response);
+      const result = await response.json();
+      toast(result.message, "success");
+      state.busy = false;
+      await refreshMaps();
+      dom.select.value = entry.name;
+      await loadLayer(previousLayer, { skipDirtyCheck: true });
+      dom.saveStatus.textContent = result.message;
+    } catch (error) {
+      dom.saveStatus.textContent = error.message;
+      toast(error.message, "error");
+    } finally {
+      state.busy = false; updateSourceControls(); updateEditorUi();
+    }
+  }
+
   function currentLabels() { return state.layer === LAYER_TERRAIN ? terrainLabels : occupancyLabels; }
   function labelName(value) { return currentLabels().find((entry) => entry.value === value)?.name || String(value); }
 
@@ -307,6 +473,7 @@
     dom.dirty.classList.toggle("is-dirty", state.dirty);
     dom.zoomLabel.textContent = `${Math.round(state.zoom * 100)}%`;
     dom.canvas.classList.toggle("is-panning", state.tool === "pan");
+    dom.canvas.classList.toggle("is-frame-picking", state.tool === "frame");
     updateDirectionUi();
   }
 
@@ -394,6 +561,7 @@
     ctx.drawImage(state.mapCanvas, state.panX, state.panY, state.width * state.zoom, state.height * state.zoom);
     drawDirections(ctx);
     drawPreview(ctx);
+    drawCoordinateFrame(ctx);
   }
 
   function drawDirections(context) {
@@ -406,7 +574,7 @@
       for (let x = 0; x < state.width && drawn < 5000; x += cellStep) {
         const index = y * state.width + x;
         if (state.values[index] < 2) continue;
-        const angle = state.direction[index] / 255 * Math.PI * 2;
+        const angle = state.direction[index] / 255 * Math.PI * 2 - state.originYaw;
         const sx = state.panX + (x + 0.5) * state.zoom;
         const sy = state.panY + (state.height - y - 0.5) * state.zoom;
         const ex = sx + Math.cos(angle) * arrowLength, ey = sy - Math.sin(angle) * arrowLength;
@@ -440,6 +608,43 @@
       context.strokeRect(x, y, state.brushSize * state.zoom, state.brushSize * state.zoom);
     }
     context.setLineDash([]);
+  }
+
+  function drawCoordinateFrame(context) {
+    const definition = frameDraft();
+    const start = worldToScreen(definition.originX, definition.originY);
+    if (!start) return;
+    const length = FRAME_AXIS_PX;
+    const drawAxis = (heading, color, label) => {
+      const localHeading = heading - state.originYaw;
+      const endX = start.x + Math.cos(localHeading) * length;
+      const endY = start.y - Math.sin(localHeading) * length;
+      context.strokeStyle = color; context.fillStyle = color; context.lineWidth = 2.2;
+      context.beginPath(); context.moveTo(start.x, start.y); context.lineTo(endX, endY); context.stroke();
+      const head = 8;
+      context.beginPath(); context.moveTo(endX, endY);
+      context.lineTo(endX - Math.cos(localHeading - 0.55) * head, endY + Math.sin(localHeading - 0.55) * head);
+      context.lineTo(endX - Math.cos(localHeading + 0.55) * head, endY + Math.sin(localHeading + 0.55) * head);
+      context.closePath(); context.fill();
+      context.font = "700 12px ui-monospace, monospace"; context.fillText(label, endX + 5, endY - 5);
+    };
+    context.save();
+    context.shadowBlur = 6; context.shadowColor = "rgba(0,0,0,.8)";
+    drawAxis(definition.heading, "#ff6b62", "+X");
+    drawAxis(definition.heading + Math.PI / 2, "#53d99f", "+Y");
+    // Grab handles: the origin moves the frame, the +X tip turns it.
+    const localHeading = definition.heading - state.originYaw;
+    const tipX = start.x + Math.cos(localHeading) * length;
+    const tipY = start.y - Math.sin(localHeading) * length;
+    const moving = state.drag?.kind === "frame-move";
+    const turning = state.drag?.kind === "frame-rotate";
+    context.fillStyle = moving ? "#f0b85c" : "#eefefd";
+    context.beginPath(); context.arc(start.x, start.y, 5, 0, Math.PI * 2); context.fill();
+    context.strokeStyle = moving ? "#f0b85c" : "rgba(238,254,253,.5)"; context.lineWidth = 1.6;
+    context.beginPath(); context.arc(start.x, start.y, FRAME_HANDLE_PX - 4, 0, Math.PI * 2); context.stroke();
+    context.fillStyle = turning ? "#f0b85c" : "#ff6b62";
+    context.beginPath(); context.arc(tipX, tipY, 4.5, 0, Math.PI * 2); context.fill();
+    context.restore();
   }
 
   function fitMap() {
@@ -483,13 +688,35 @@
     return { left, top, cx: left + state.zoom / 2, cy: top + state.zoom / 2 };
   }
 
+  function mapCellToWorld(x, y) {
+    const localX = (x + 0.5) * state.resolution;
+    const localY = (y + 0.5) * state.resolution;
+    const cosine = Math.cos(state.originYaw), sine = Math.sin(state.originYaw);
+    return {
+      x: state.originX + cosine * localX - sine * localY,
+      y: state.originY + sine * localX + cosine * localY
+    };
+  }
+
+  function worldToScreen(worldX, worldY) {
+    if (!state.values) return null;
+    const dx = worldX - state.originX, dy = worldY - state.originY;
+    const cosine = Math.cos(state.originYaw), sine = Math.sin(state.originYaw);
+    const localX = cosine * dx + sine * dy;
+    const localY = -sine * dx + cosine * dy;
+    return {
+      x: state.panX + localX / state.resolution * state.zoom,
+      y: state.panY + (state.height - localY / state.resolution) * state.zoom
+    };
+  }
+
   function updateHover(point) {
     state.hover = screenToMap(point);
     if (!state.hover) {
       dom.coordinate.textContent = "栅格 —"; dom.worldCoordinate.textContent = "世界坐标 —"; dom.cellValue.textContent = "标签 —";
     } else {
       const { x, y } = state.hover, index = y * state.width + x;
-      const worldX = state.originX + (x + 0.5) * state.resolution, worldY = state.originY + (y + 0.5) * state.resolution;
+      const world = mapCellToWorld(x, y), worldX = world.x, worldY = world.y;
       dom.coordinate.textContent = `栅格 X ${x} · Y ${y}`;
       dom.worldCoordinate.textContent = `世界 ${worldX.toFixed(2)}, ${worldY.toFixed(2)} m`;
       const direction = state.layer === LAYER_TERRAIN && state.values[index] >= 2 ? ` · ${(state.direction[index] / 255 * 360).toFixed(0)}°` : "";
@@ -547,7 +774,8 @@
   function directionFromLine(from, to) {
     const dx = to.x - from.x, dy = to.y - from.y, length = Math.hypot(dx, dy);
     if (length < 1e-6) return 0;
-    let angle = Math.atan2(dx / length, -dy / length);
+    let angle = Math.atan2(dx / length, -dy / length) + state.originYaw;
+    angle %= Math.PI * 2;
     if (angle < 0) angle += Math.PI * 2;
     return Math.max(0, Math.min(255, Math.round(angle / (Math.PI * 2) * 255)));
   }
@@ -569,6 +797,10 @@
     if (event.button !== 0) return;
     const point = screenToMap(screen);
     if (!point) return;
+    if (state.tool === "frame") {
+      beginFrameDrag(screen, point, event.pointerId);
+      dom.canvas.setPointerCapture(event.pointerId); event.preventDefault(); return;
+    }
     snapshotForUndo();
     state.drag = { kind: state.tool, start: point, last: point, changed: false, pointerId: event.pointerId };
     dom.canvas.setPointerCapture(event.pointerId);
@@ -580,6 +812,7 @@
   function pointerMove(event) {
     const screen = eventPoint(event);
     updateHover(screen);
+    updateFrameCursor(screen);
     if (!state.drag || state.drag.pointerId !== event.pointerId) return;
     if (state.drag.kind === "pan") {
       state.panX = state.drag.panX + screen.x - state.drag.screen.x;
@@ -588,7 +821,8 @@
     }
     const point = screenToMap(screen, true);
     if (!point) return;
-    if (state.drag.kind === "brush") paintStroke(state.drag.last, point);
+    if (state.drag.kind.startsWith("frame")) updateFrameDrag(state.drag, point);
+    else if (state.drag.kind === "brush") paintStroke(state.drag.last, point);
     else state.preview = { start: state.drag.start, end: point };
     state.drag.last = point; scheduleRender();
   }
@@ -596,10 +830,11 @@
   function pointerUp(event) {
     if (!state.drag || state.drag.pointerId !== event.pointerId) return;
     const drag = state.drag;
-    if (drag.kind === "rect") applyRectangle(drag.start, drag.last);
+    if (drag.kind.startsWith("frame")) updateFrameDrag(drag, drag.last);
+    else if (drag.kind === "rect") applyRectangle(drag.start, drag.last);
     else if (drag.kind === "line") applyLine(drag.start, drag.last);
     state.preview = null; state.drag = null;
-    if (drag.kind !== "pan" && !drag.changed) discardLatestSnapshot();
+    if (drag.kind !== "pan" && !drag.kind.startsWith("frame") && !drag.changed) discardLatestSnapshot();
     if (dom.canvas.hasPointerCapture(event.pointerId)) dom.canvas.releasePointerCapture(event.pointerId);
     scheduleRender();
   }
@@ -607,6 +842,7 @@
   function setTool(tool) {
     state.tool = tool;
     for (const button of document.querySelectorAll("[data-editor-tool]")) button.classList.toggle("is-active", button.dataset.editorTool === tool);
+    dom.canvas.classList.remove("is-frame-grabbing", "is-frame-rotating");
     updateEditorUi(); scheduleRender();
   }
 
@@ -617,6 +853,8 @@
   dom.loadOccupancy.addEventListener("click", () => loadLayer(LAYER_OCCUPANCY));
   dom.openTerrain.addEventListener("click", () => loadLayer(LAYER_TERRAIN));
   dom.convert.addEventListener("click", convertToTerrain);
+  dom.frameApply.addEventListener("click", applyMapFrame);
+  for (const input of [dom.frameX, dom.frameY, dom.frameYaw]) input.addEventListener("input", updateFrameDraftFromInputs);
   dom.save.addEventListener("click", () => saveCurrent());
   dom.undo.addEventListener("click", undo);
   dom.fit.addEventListener("click", fitMap);
@@ -631,7 +869,7 @@
   dom.canvas.addEventListener("pointermove", pointerMove);
   dom.canvas.addEventListener("pointerup", pointerUp);
   dom.canvas.addEventListener("pointercancel", pointerUp);
-  dom.canvas.addEventListener("pointerleave", () => { if (!state.drag) { state.hover = null; updateHover({ x: -1, y: -1 }); } });
+  dom.canvas.addEventListener("pointerleave", () => { if (!state.drag) { state.hover = null; updateHover({ x: -1, y: -1 }); } dom.canvas.classList.remove("is-frame-grabbing", "is-frame-rotating"); });
   dom.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   dom.canvas.addEventListener("wheel", (event) => { if (!state.values) return; event.preventDefault(); zoomAt(event.deltaY < 0 ? 1.12 : 0.89, event.clientX, event.clientY); }, { passive: false });
 

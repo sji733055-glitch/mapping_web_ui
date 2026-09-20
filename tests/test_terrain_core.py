@@ -39,7 +39,7 @@ class TerrainCoreTests(unittest.TestCase):
         return path
 
     def test_editor_protocol_round_trip_for_both_layers(self):
-        metadata = MapMetadata(3, 2, 0.05, -1.0, 2.0)
+        metadata = MapMetadata(3, 2, 0.05, -1.0, 2.0, 0.25)
         occupancy = EditorMap(
             LAYER_OCCUPANCY,
             metadata,
@@ -47,6 +47,7 @@ class TerrainCoreTests(unittest.TestCase):
         )
         decoded = decode_editor_map(encode_editor_map(occupancy))
         self.assertEqual(decoded.layer, LAYER_OCCUPANCY)
+        self.assertAlmostEqual(decoded.metadata.origin_yaw, 0.25)
         np.testing.assert_array_equal(decoded.values, occupancy.values)
 
         terrain = EditorMap(

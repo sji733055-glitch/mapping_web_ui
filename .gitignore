@@ -5,5 +5,7 @@ __pycache__/
 data/pcd/*.pcd
 data/map/*.pgm
 data/map/*.yaml
+data/map/*.msgpack
+data/map/*_frame.json
 !data/pcd/.gitkeep
 !data/map/.gitkeep

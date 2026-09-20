@@ -221,8 +221,14 @@ python3 -m compileall -q backend tests
 python3 -m unittest discover -s tests -v
 node --check web/app.js
 node --check web/point-cloud-viewer.js
+node --check web/map-editor.js
+node tests/editor_pointer_harness.mjs
 bash -n run.sh
 ```
+
+`tests/editor_pointer_harness.mjs` drives the real `web/map-editor.js` through a
+minimal DOM stub, so map-editor pointer interactions stay covered without a
+browser.
 
 For backend or transport changes, also verify:
 

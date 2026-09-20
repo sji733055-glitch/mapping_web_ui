@@ -9,6 +9,7 @@
 - 实时显示累计点数、覆盖范围、地图尺寸、建图时长、行驶里程与输入频率；
 - 点击“结束并保存”后生成三维 PCD 和 Nav2 可读的 PGM/YAML；
 - 在“地图编辑”工作区用笔刷、矩形或画线修整二维 PGM 占据图，并可撤销、缩放和平移；
+- 可直接在二维图上点选新 `map` 原点并拖出 `map +X` 方向，成组变换完整 PCD、PGM/YAML 和已有 terrain，为后续重定位发布 `map→odom` TF 固定统一的地图基准；
 - 把 PGM/YAML 一键转换为 HW `map_server` 使用的 terrain msgpack，再标注平地、障碍、斜坡、各级台阶、飞坡及其方向；
 - 同时发布 `/mapping/accumulated_cloud` 与 `/mapping/status`，仍可在 RViz/Foxglove 中观察；
 - 提供 `/mapping/start`、`/mapping/stop_and_save`、`/mapping/reset` 三个 `std_srvs/srv/Trigger` 服务；
@@ -62,11 +63,14 @@ robot_state_publisher → mid360_driver → small_point_lio
 完成一次建图并保存后，点击页头的“地图编辑”：
 
 1. 从 `data/map` 选择地图，点击“编辑二维 PGM”。二维层提供障碍物、可通行、未知区域三类像素，可用笔刷、矩形和画线修图；保存只原子替换该地图 YAML 引用的 PGM，不改变 YAML 的分辨率或原点。
-2. 点击“生成 terrain MSG”。后端按 YAML 的 `occupied_thresh` 和 `negate` 把二维图转换为 `<地图名称>_terrain.msgpack`，随后自动打开 terrain 图层。
-3. 在 terrain 图层选择 `0–6` 标签；斜坡、台阶和飞坡可设置方向。画线工具会使用线段左侧法向作为通过方向，笔刷和矩形使用方向滑块的值。
-4. 点击“保存当前图层”。输出采用 `nav_opensource/HW/HWSentryNav26/map_server` 兼容的 `width`、`height`、`resolution`、`terrain`、`direction` MessagePack 字段。
+2. 在“map 坐标系”中点击“在图上拖出原点与 +X”后有三种手势：在空白处按下＝该点成为新 `(0,0)` 并拖出 `map +X`；拖动原点圆圈＝平移坐标系且保持朝向；拖动 +X 箭头＝只转向且保持原点。也可以在输入框中直接填写原点在当前地图中的 X/Y 和 +X 朝向角。点击“统一 PCD 与二维图坐标系”并确认后，后端会对同名完整 PCD 应用相同二维刚体变换，把 PGM 和已有 terrain 最近邻重采样到 yaw=0 的轴对齐栅格，并同步旋转 terrain 方向。建议在精修 PGM/terrain 前先定义坐标系，避免重复重采样。
+3. 点击“生成 terrain MSG”。后端按 YAML 的 `occupied_thresh` 和 `negate` 把二维图转换为 `<地图名称>_terrain.msgpack`，随后自动打开 terrain 图层。
+4. 在 terrain 图层选择 `0–6` 标签；斜坡、台阶和飞坡可设置方向。画线工具会使用线段左侧法向作为通过方向，笔刷和矩形使用方向滑块的值。
+5. 点击“保存当前图层”。输出采用 `nav_opensource/HW/HWSentryNav26/map_server` 兼容的 `width`、`height`、`resolution`、`terrain`、`direction` MessagePack 字段。
 
-重新从 PGM 生成已存在的 terrain 文件前，网页会明确提示该操作会覆盖已有语义和方向标注。地图编辑使用普通同源 HTTP 接口，不依赖 WebSocket，因此在 VS Code Remote SSH 的 HTTP 兼容模式下也能使用。
+坐标系设置需要 `data/pcd/<名称>.pcd` 与 PGM/YAML 同名存在；缺少 PCD 时网页会禁用应用按钮，避免只改二维图。操作会生成 `<名称>_frame.json`，其中 `source_to_map` 是把原始 LIO/odom 点坐标变换到固定 map 坐标的变换，也就是后续 TF 中 `map→odom` 所需的平面变换语义；`map_to_source` 是其逆变换。重复定义会在元数据中累计组合，但每次都需要重采样二维栅格，因此应尽量一次定准。
+
+重新从 PGM 生成已存在的 terrain 文件前，网页会明确提示该操作会覆盖已有语义和方向标注。地图编辑和坐标系设置使用普通同源 HTTP 接口，不依赖 WebSocket，因此在 VS Code Remote SSH 的 HTTP 兼容模式下也能使用。
 
 ## 输出
 
@@ -78,10 +82,11 @@ data/
 └── map/
     ├── <地图名称>.pgm
     ├── <地图名称>.yaml
-    └── <地图名称>_terrain.msgpack  # 在地图编辑工作区生成
+    ├── <地图名称>_terrain.msgpack  # 在地图编辑工作区生成
+    └── <地图名称>_frame.json       # source↔map 变换与坐标系修订记录
 ```
 
-PCD 与 `/cloud_registered` 使用相同坐标系；PGM/YAML 默认用 `Z=0.05–1.50 m` 的切片生成。二维图的有点栅格为占用，其余栅格为空闲，与现有 `pcd2pgm` 的投影语义一致。
+刚保存时 PCD 与 `/cloud_registered` 使用相同数值坐标，`map` 与点云源坐标系按单位变换记录。PGM/YAML 默认用 `Z=0.05–1.50 m` 的切片生成；二维图的有点栅格为占用，其余栅格为空闲，与现有 `pcd2pgm` 的投影语义一致。自定义 map 基准后，PCD 点、二维栅格和 terrain 都处于同一个 `map` 坐标系，YAML 栅格 yaw 保持为 0，以兼容只接收 `origin_x/origin_y` 的 HW terrain server。
 
 ## 常用参数
 
@@ -141,7 +146,10 @@ ros2 service call /mapping/reset std_srvs/srv/Trigger '{}'
 ```bash
 cd /home/mas/mapping_web_ui
 python3 -m unittest discover -s tests -v
+node tests/editor_pointer_harness.mjs
 ```
+
+`tests/editor_pointer_harness.mjs` 用一个极简 DOM 桩加载真实的 `web/map-editor.js`，回放取帧的按下、平移、转向手势，因此不需要浏览器或构建工具即可回归地图编辑器的指针交互。
 
 暂时没有连接雷达时，可以在控制台点击“开始建图”后，用合成房间点云检查完整链路：
 
@@ -167,6 +175,7 @@ curl http://127.0.0.1:8765/api/status
 ```text
 backend/mapping_server.py   ROS 2 节点、HTTP/WebSocket 服务与会话控制
 backend/mapping_core.py     体素累计、PCD 与 PGM/YAML 生成
+backend/map_frame_core.py   PCD/二维/terrain 成组坐标变换与 frame 元数据
 backend/terrain_core.py     PGM 编辑、二维转 terrain、MessagePack 读写
 web/                       无外部 CDN 的网页前端与 WebGL 3D 查看器
 tests/                     核心数据路径测试
