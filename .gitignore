@@ -2,10 +2,14 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ros/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
 data/pcd/*.pcd
 data/map/*.pgm
 data/map/*.yaml
 data/map/*.msgpack
 data/map/*_frame.json
+data/session_history/
 !data/pcd/.gitkeep
 !data/map/.gitkeep

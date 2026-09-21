@@ -39,7 +39,8 @@ Keep the implementation dependency-light and preserve these boundaries:
   - ROS-independent voxel accumulation;
   - map-name validation;
   - binary PCD generation;
-  - PGM/YAML occupancy-map generation.
+  - height slicing, block-min preview pooling and PGM/YAML occupancy-map
+    generation.
 - `web/index.html`
   - semantic structure of the single-page operator console.
 - `web/styles.css`
@@ -97,7 +98,7 @@ Subscribe  /Odometry                    nav_msgs/msg/Odometry
 Publish    /mapping/accumulated_cloud   sensor_msgs/msg/PointCloud2
 Publish    /mapping/status              std_msgs/msg/String containing JSON
 Service    /mapping/start               std_srvs/srv/Trigger
-Service    /mapping/stop_and_save       std_srvs/srv/Trigger
+Service    /mapping/stop_and_save       std_srvs/srv/Trigger (3-D PCD only)
 Service    /mapping/reset               std_srvs/srv/Trigger
 ```
 
@@ -136,11 +137,22 @@ Important behavior:
 - The start control remains unavailable until `/cloud_registered` is online.
 - Saving must snapshot the full accumulated cloud, not the browser-decimated
   view.
+- `结束并保存` writes the 3-D PCD only. The 2-D map is always a separate,
+  repeatable operator step over a `data/pcd` file, so the height slice and the
+  filters can be previewed and retuned without touching the disk. Keep the
+  browser preview and the on-disk export on one shared slicing function.
+- The offline slice preview must never write files and must stay available in
+  HTTP fallback mode; it shares the session-state guard with the conversion
+  (`MAPPING`/`SAVING` returns 409).
 - Never overwrite an existing map silently. Add a timestamp suffix when the
   requested output name already exists.
 - Validate map names before using them as paths. Path separators and traversal
   names must remain rejected.
 - A failed 2-D slice must not corrupt an existing PCD, PGM, or YAML file.
+- The slice conversion accepts operator parameters (Z window, resolution,
+  radius, min_neighbors, padding, output name); validate every one of them
+  before it can reach the rasterizer. An empty field means "use the configured
+  default".
 - Browser and ROS service commands must use the same session methods.
 
 Default output layout:
@@ -223,12 +235,20 @@ node --check web/app.js
 node --check web/point-cloud-viewer.js
 node --check web/map-editor.js
 node tests/editor_pointer_harness.mjs
+node tests/app_status_harness.mjs
 bash -n run.sh
 ```
 
 `tests/editor_pointer_harness.mjs` drives the real `web/map-editor.js` through a
 minimal DOM stub, so map-editor pointer interactions stay covered without a
 browser.
+
+`tests/app_status_harness.mjs` drives the real `web/app.js` through a minimal
+DOM, WebSocket and fetch stub, replaying the status sequence over both
+transports, so console state rendering stays covered without a browser. It also
+covers the self-service 2-D slice flow: defaults coming from `status.map_export`
+without clobbering operator edits, PGM (P5) preview decoding and statistics, the
+conversion request body, and a save command that no longer carries `z_max`.
 
 For backend or transport changes, also verify:
 
@@ -253,7 +273,8 @@ When a radar is connected, hardware verification should check:
 - both `/cloud_registered` and `/Odometry` are live;
 - the web backend reports the real point-cloud frequency;
 - a short named smoke session accumulates nonzero points;
-- PCD, PGM, and YAML outputs are all produced;
+- ending the session produces the PCD only;
+- converting that PCD to a 2-D map then produces PGM and YAML;
 - any driver/LIO warnings that occurred during startup are reported.
 
 Do not leave a mapping session active after automated verification. End and

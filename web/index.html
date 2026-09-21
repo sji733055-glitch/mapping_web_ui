@@ -43,6 +43,7 @@
               <h2>累计点云</h2>
             </div>
             <div class="viewer-tools" aria-label="视图控制">
+              <button class="tool-button" id="preview-toggle-button" type="button" aria-expanded="false" aria-controls="preview-panel">点云预览</button>
               <button class="tool-button" id="top-view-button" type="button">俯视</button>
               <button class="tool-button" id="fit-view-button" type="button">适应视图</button>
             </div>
@@ -71,6 +72,29 @@
               <span id="height-range">—</span>
             </div>
           </div>
+
+          <section class="preview-panel" id="preview-panel" aria-label="文件夹点云预览" hidden>
+            <div class="preview-head">
+              <div class="preview-title">
+                <p class="section-kicker">PCD PREVIEW · data/pcd</p>
+                <strong>文件夹点云预览</strong>
+              </div>
+              <div class="preview-actions">
+                <select id="preview-file-select" class="editor-select" aria-label="选择 data/pcd 中的点云文件"></select>
+                <button class="tool-button" id="preview-refresh-button" type="button" aria-label="刷新 PCD 列表">↻</button>
+                <button class="tool-button preview-load-button" id="preview-load-button" type="button" disabled>预览</button>
+                <button class="tool-button" id="preview-clear-button" type="button" disabled>清除</button>
+                <button class="icon-button" id="preview-close-button" type="button" aria-label="关闭预览面板">✕</button>
+              </div>
+            </div>
+            <div class="preview-canvas-wrap">
+              <canvas id="preview-canvas" aria-label="文件夹点云预览视图"></canvas>
+              <div class="preview-stats">
+                <span id="preview-status">选择 data/pcd 中的 .pcd 后点「预览」；实时点云不受影响。</span>
+              </div>
+              <div class="preview-points" id="preview-points">0 点</div>
+            </div>
+          </section>
 
           <div class="viewer-footer">
             <span>左键旋转</span>
@@ -141,9 +165,10 @@
               </button>
               <button class="primary-button stop" id="stop-button" type="button" disabled>
                 <span class="button-symbol" aria-hidden="true">■</span>
-                <span><b>结束并保存</b><small>生成 PCD · PGM · YAML</small></span>
+                <span><b>结束并保存</b><small>只写入三维 PCD</small></span>
               </button>
             </div>
+            <p class="field-help" id="stop-button-help">保存只写 <code>data/pcd/&lt;名称&gt;.pcd</code>；二维 PGM/YAML 不随保存生成，改由下方「点云转二维图」按需切片。</p>
 
             <button class="text-button" id="reset-button" type="button" disabled>清空当前会话</button>
             <div class="save-progress" id="save-progress" hidden>
@@ -191,6 +216,10 @@
               <span><i class="health-dot" id="storage-dot"></i>输出目录</span>
               <b id="storage-status">检查中</b>
             </div>
+            <div class="health-row">
+              <span><i class="health-dot" id="dynamic-removal-dot"></i>动态拖影清理</span>
+              <b id="dynamic-removal-status">检查中</b>
+            </div>
           </section>
 
           <section class="output-card" id="output-card" hidden>
@@ -198,8 +227,61 @@
             <h2>最近保存</h2>
             <code id="output-path">—</code>
             <div class="output-files">
-              <span>PCD</span><span>PGM</span><span>YAML</span>
+              <span>PCD 已写入</span>
             </div>
+            <p class="output-note">二维 PGM/YAML 不随保存生成；需要时在下方「点云转二维图」中按需切片。</p>
+          </section>
+
+          <section class="control-card pcd-convert-card">
+            <div class="compact-title-row">
+              <div>
+                <p class="section-kicker">SELF-SERVICE 2-D MAP</p>
+                <h2>点云转二维图</h2>
+              </div>
+              <button class="icon-button" id="pcd-refresh-button" type="button" aria-label="刷新 PCD 列表">↻</button>
+            </div>
+            <p class="convert-note" id="convert-note">改动切片参数后先预览，确认无遮挡再生成 PGM/YAML；同名地图已存在时自动加时间戳，不覆盖旧图。</p>
+
+            <label class="field-label" for="pcd-file-select">项目 data/pcd</label>
+            <select id="pcd-file-select" class="editor-select">
+              <option value="">正在读取 PCD…</option>
+            </select>
+            <button class="tool-button convert-look-button" id="pcd-look-button" type="button" disabled>在三维预览中查看当前切片</button>
+
+            <div class="convert-params">
+              <label>高度基准
+                <select id="pcd-height-mode">
+                  <option value="ground">自动地面（推荐）</option>
+                  <option value="absolute">全局 Z（兼容）</option>
+                </select>
+              </label>
+              <label>障碍下限 / m<input id="pcd-z-min" type="number" step="0.05" value="0.05" /></label>
+              <label>障碍上限 / m<input id="pcd-z-max" type="number" step="0.05" value="1.50" /></label>
+              <label>分辨率 / m<input id="pcd-resolution" type="number" step="0.01" value="0.05" /></label>
+              <label>滤波半径 / m<input id="pcd-radius" type="number" step="0.05" value="0.50" /></label>
+              <label>最小邻点<input id="pcd-min-neighbors" type="number" step="1" value="10" /></label>
+              <label>边缘留白 / m<input id="pcd-padding" type="number" step="0.05" value="0.25" /></label>
+              <label class="convert-name-field">输出地图名<input id="pcd-output-name" type="text" maxlength="48" autocomplete="off" spellcheck="false" placeholder="留空＝沿用点云名称" /></label>
+            </div>
+            <p class="field-help">「自动地面」会估计倾斜地面，上下限按相对地面高度计算，避免远处地面被投影成黑色障碍。</p>
+            <div class="convert-param-actions">
+              <button class="text-button" id="pcd-defaults-button" type="button">恢复默认值</button>
+              <button class="tool-button" id="pcd-map-preview-button" type="button" disabled>预览二维切片</button>
+            </div>
+
+            <div class="convert-preview-wrap" id="pcd-map-preview-wrap" hidden>
+              <canvas id="pcd-map-preview-canvas" aria-label="二维切片预览画布"></canvas>
+              <div class="convert-preview-bar">
+                <span id="pcd-map-preview-stats">—</span>
+                <span class="convert-preview-key"><i class="key-occupied"></i>占据<i class="key-free"></i>空闲</span>
+              </div>
+            </div>
+
+            <button class="pcd-convert-button" id="pcd-convert-button" type="button" disabled>
+              <b>生成 PGM · YAML</b>
+              <span>使用当前切片参数</span>
+            </button>
+            <p class="pcd-convert-status" id="pcd-convert-status">把 .pcd 放入 data/pcd 后刷新；支持 ASCII 和未压缩 binary PCD。</p>
           </section>
         </aside>
       </main>

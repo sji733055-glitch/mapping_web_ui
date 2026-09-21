@@ -7,7 +7,10 @@
 - 点击“开始建图”后，从空会话开始累计 `/cloud_registered`；
 - 网页以 3D 方式显示降采样后的累计点云，支持旋转、平移、缩放和俯视；
 - 实时显示累计点数、覆盖范围、地图尺寸、建图时长、行驶里程与输入频率；
-- 点击“结束并保存”后生成三维 PCD 和 Nav2 可读的 PGM/YAML；
+- 默认用时间对齐的里程计原点做自由空间射线清理，删除行人走过后被后续观测否定的拖影体素；
+- 点击“结束并保存”只写入三维 PCD：完整累计点全部落盘，保存本身不再生成二维图；
+- 点云与二维图完全解耦：在“点云转二维图”卡片里自选 PCD、调切片参数、先看二维预览，再按需生成 Nav2 可读的 PGM/YAML；
+- 支持 `data/pcd` 中已有的 ASCII 或未压缩 binary PCD（允许 intensity 等附加字段），可在三维预览中只看当前 Z 切片范围内的点；
 - 在“地图编辑”工作区用笔刷、矩形或画线修整二维 PGM 占据图，并可撤销、缩放和平移；
 - 可直接在二维图上点选新 `map` 原点并拖出 `map +X` 方向，成组变换完整 PCD、PGM/YAML 和已有 terrain，为后续重定位发布 `map→odom` TF 固定统一的地图基准；
 - 把 PGM/YAML 一键转换为 HW `map_server` 使用的 terrain msgpack，再标注平地、障碍、斜坡、各级台阶、飞坡及其方向；
@@ -58,6 +61,91 @@ robot_state_publisher → mid360_driver → small_point_lio
 
 网页启动的 ROS 进程日志位于 `.ros/managed/`。关闭网页标签不会停止节点；结束 `run.sh` 时，会清理由该网页后端启动的节点。
 
+## 本地 Small Point-LIO 源码
+
+项目内置了从导航工作区原样复制的 Small Point-LIO 包：
+
+```text
+ros2_ws/src/small_point_lio
+```
+
+该副本可在本项目中独立修改，不需要改动 `/home/mas/mas_nav_2027_native`。初始副本包含完整 C++ 源码、launch、包内示例配置、MIT 许可证和必要的第三方源码。
+
+需要使用本地副本时，只构建这一个包：
+
+```bash
+cd /home/mas/桌面/mapping_web_ui/ros2_ws
+source /opt/ros/jazzy/setup.bash
+source /home/mas/mas_nav_2027_native/install/setup.bash
+colcon build --symlink-install --packages-select small_point_lio \
+  --allow-overriding small_point_lio
+```
+
+`run.sh` 会先加载导航 overlay，再在 `ros2_ws/install/setup.bash` 存在时加载本地 overlay。网页的“启动建图节点”不再通过包名模糊解析 LIO，而是直接启动项目内 `ros2_ws/install/small_point_lio/lib/small_point_lio/small_point_lio_node`。如果本地包尚未构建，或者源码比可执行文件新，页面会拒绝启动并提示重新构建，不会悄悄回退到导航主项目的同名包。`run.sh` 本身不会自动执行 `colcon build`，所以网页后端在 LIO 未构建时仍然可用。
+
+默认运行参数仍以导航工作区的 `small_point_lio_params.yaml` 为真源，副本内的 `config/mid360.yaml` 只是包自带示例。更详细的 overlay 说明见 `ros2_ws/README.md`。
+
+以后在项目里增加点云处理时，常用集成点是：
+
+- `src/small_point_lio/preprocess.cpp`：配准前的距离裁减、下采样和原始点预处理；
+- `src/small_point_lio/small_point_lio.cpp`：去畸变、状态估计与建图主数据路径；
+- `src/small_point_lio_node.cpp` 的 `set_pointcloud_callback`：已配准到 odom 系、即将发布为 `/cloud_registered` 的点云。
+
+修改 C/C++ 源码后必须重新执行上述 `colcon build` 命令，再从网页启动建图节点。
+
+## 动态拖影清理
+
+去动态处理位于本项目的全局体素累积层，不改 Small Point-LIO 的位姿估计，也不修改导航主项目。核心算法参考 `nav_opensource/HW` 的 `offline_mapping_optimizer` 射线滤波器：每个处理帧从与点云时间戳最接近的 `/Odometry` 位姿换算真实雷达原点，再用 Amanatides–Woo 3D-DDA 精确遍历射线穿过的体素。为适应边建图边清理，在 HW 离线累计穿越次数的基础上增加了“分帧去重 + 命中优先”保护：
+
+- 当前帧命中的体素继续保留，并清零其空闲计数；
+- 每个角度格只取最近回波，3D-DDA 排除回波终点体素，防止用远点穿透近处表面；
+- 被射线穿过、但当前帧没有命中的历史体素累积一次 miss；
+- 同一体素在 5 个不同处理帧中都被观测为空才删除；任意新命中会重置计数；
+- 没有被射线观测的区域不衰减、不忘记，避免因机器人离开而删除墙体。
+
+为了不阻塞 ROS 点云回调，射线计算在独立的“最新帧”后台工作线程中默认以 3 Hz 运行，每帧最多 4000 条射线，只处理 0.38–10 m 范围。HW 离线工具默认穿越阈值为 2，本项目在线默认为 5 个不同处理帧，避免配准波动或稀疏回波过早删除静态结构。网页“数据链路”会显示功能是否开启、累计清理点数和处理帧数。
+
+为了利用动态物体出现之前的自由空间证据，新建会话默认还会记录有界的磁盘关键帧历史：
+
+- 平移达到 0.10 m、旋转达到 5°，或距上一关键帧达到 0.75 s 时记录；最小间隔 0.20 s，因此机器人静止时的行人移动也会留下观测证据；
+- 点云回调只向有界队列提交关键帧，后台线程每角度格保留最近回波，每帧最多 4000 条射线；
+- 历史以最多 64 帧一块的二进制 chunk 原子写入 `data/session_history/`，默认硬上限 2 GiB；队列拥塞或达到上限时只丢弃/停止历史记录，不阻塞 ROS 回调，也不中断建图；
+- 结束建图时逐块回放历史，对最终点云同时统计命中帧和空闲穿越帧。默认至少 5 个关键帧判空，且空闲帧数至少是命中帧数的 2 倍才删除；
+- 如果候选删除超过全图 35%，认为可能存在位姿/参数异常，整次离线清理自动放弃，保留原累计点云；
+- 成功导出后默认删除临时历史；使用 `--keep-keyframe-history` 可保留 `.history` 目录以便重新调参。导出失败或后端建图中异常退出时会保留历史，便于恢复和排查。
+
+因此，新会话中动态物体即使最后停在某处，也可以被它出现之前的历史自由空间证据清理。已有的单个 PCD 仍然没有时间序列和观测原点，无法追溯执行这种离线清理。
+
+保存时默认还会执行一层保守的 ERASOR 风格极坐标格投票，用来补足“射线没有恰好穿过物体外壳”时的残影：每个关键帧以雷达原点为中心分成环 × 扇区，比较累计地图与当前扫描在同一区域中的竖直结构高度跨度。地图结构明显更高、扫描只剩低矮地面、且这种差异得到至少两个关键帧确认时，才把高于局部地面的体素作为消失候选。它在射线回放之后执行；极坐标票与射线票合计会再次受 `--keyframe-max-removal-fraction` 总安全上限约束，超限时会**只放弃极坐标票**并保留已经安全通过的射线清理结果。
+
+每次保存会在 PCD 旁原子写入 `<名称>.mapping-report.json`。其中记录输入/输出点数、体素大小、坐标系、射线清理与极坐标投票的分项统计、跳过/回退原因，便于发现误删时复核；它不改变 PCD 格式，也不影响二维图的独立转换。
+
+## 点云转二维图（自助）
+
+保存会话只负责三维点云：“结束并保存”写入 `data/pcd/<名称>.pcd`，**不会**再顺带生成 PGM/YAML。二维图是一个独立的、可反复重来的步骤，参数与预览都归操作者：
+
+1. 把 `.pcd` 文件放入本项目的 `data/pcd/`；文件名主体需符合地图名规则（字母、数字、点、短横线或下划线，最长 48 字符）。
+2. 在“实时建图”右侧滚动到“点云转二维图”，点击刷新并选择文件。
+3. 调整切片参数：默认高度基准为「自动地面」，后端会在 0.5 m XY 网格内取低位高度样本，再用确定性 RANSAC 拟合主地面平面。「障碍下限–障碍上限」据此按**相对地面高度**判定，因 LIO 俯仰/横滚偏差而倾斜的远处地面不会再落入障碍切片。「全局 Z」保留原有绝对坐标语义，供无法稳定拟合地面或需要固定 Z 带的场景使用。其他参数为分辨率、滤波半径、最小邻点和边缘留白；数值留空表示沿用后端启动参数。首次进入时以后端默认值填充，操作者一旦改动就不再被状态轮询覆盖，点“恢复默认值”可拉回。
+4. 点“在三维预览中查看当前切片”：累计点云卡片下方会加载该 PCD，并使用与二维转换相同的高度基准和上下限选点，用来判断切片是否切到墙、地面或天花板。
+5. 点“预览二维切片”：后端在内存里完成切片、半径滤波与栅格化，返回一张 PGM 预览和完整元数据（栅格尺寸、分辨率、原点、切片点数、滤波后点数、占据格数）。预览不写任何文件；栅格过大时按整数倍做“取最暗值”降采样，只影响显示，细墙不会在预览里消失。
+6. 确认无误后点“生成 PGM · YAML”。可填“输出地图名”，留空则沿用点云名称；同名地图已存在时自动加时间戳，绝不覆盖旧图。
+
+预览走 `POST /api/pcd/map-preview`，请求体为 `{"map_name": "...", "height_mode":"ground", "z_min":…, "z_max":…, "resolution":…, "radius":…, "min_neighbors":…, "padding":…}`；`height_mode` 可为 `ground` 或 `absolute`。响应体是二进制 PGM（P5），几何与统计通过 `X-Map-*` 响应头返回，`X-Map-Height-Mode` 明确回报实际基准，自动地面模式另用 `X-Map-Ground-A/B/C` 和 `X-Map-Ground-Tilt` 回报拟合平面与倾角。转换走 `POST /api/pcd/convert`，请求体在上述切片参数之外可再加 `"output_name"`。两个接口都只在 `IDLE`/`SAVED`/`ERROR` 状态可用，建图或保存进行中返回 409。
+
+转换在普通同源 HTTP 上运行，因此 HTTP 兼容模式也可用。输入 PCD 支持 `DATA ascii` 和 `DATA binary`，只提取 `x/y/z`，自动忽略 `intensity`、`ring` 等其他字段；`binary_compressed` 会给出明确的不支持提示。转换不会重写原 PCD。预览与生成共用后端同一个切片函数，因此预览到的栅格就是最终写盘的内容。生成完成后可直接进入“地图编辑”工作区。
+
+## 文件夹点云预览
+
+在“累计点云”卡片右上角点击“点云预览”，卡片会分成上下两块：上面继续显示实时累计点云，下面是被动加载的预览画布。
+
+1. 下拉框列出 `data/pcd/` 中全部 `.pcd`（文件名主体需符合地图名规则，最长 48 字符），点“预览”加载，点“清除”清空预览画布，“✕”收起面板。
+2. 预览使用独立 WebGL 视图和自己的相机，旋转、平移、缩放、适应视图（进入后自动取景）互不影响，实时建图画面照常刷新。
+3. 预览按 `--web-max-points`（默认 220,000）等间隔抽稀后传输，状态行会同时给出原始点数和实际显示点数；磁盘上的 PCD 只被读取，从不改写。
+4. 带 `height_mode`、`z_min`/`z_max` 查询参数时，使用与二维转换相同的自动地面或全局 Z 高度窗口选点（“点云转二维图”卡片的“在三维预览中查看当前切片”就是这么调的），过滤只作用于传输的帧，不动磁盘文件。
+
+预览走 `GET /api/pcd/preview?name=<名称>`，返回与实时点云完全相同的 `MAP1` 帧格式，并用 `X-Preview-Points`、`X-Preview-Total` 响应头给出显示点数和原始点数。名称先经过地图名校验，再做目录归属校验，路径分隔符与穿越名称一律返回 400；文件不存在返回 404。读取发生在文件锁之外，因此预览一个大 PCD 不会阻塞保存流程；导出使用原子替换，预览读到的必然是完整的旧版或新版文件。因为只是同源 HTTP 与 WebGL，预览在 HTTP 兼容模式下同样可用。
+
 ## 地图编辑流程
 
 完成一次建图并保存后，点击页头的“地图编辑”：
@@ -78,15 +166,18 @@ robot_state_publisher → mid360_driver → small_point_lio
 
 ```text
 data/
-├── pcd/<地图名称>.pcd
-└── map/
+├── pcd/
+│   ├── <地图名称>.pcd
+│   └── <地图名称>.mapping-report.json # 本次清理的可审计统计与参数
+├── map/
     ├── <地图名称>.pgm
     ├── <地图名称>.yaml
     ├── <地图名称>_terrain.msgpack  # 在地图编辑工作区生成
     └── <地图名称>_frame.json       # source↔map 变换与坐标系修订记录
+└── session_history/                 # 临时或 --keep-keyframe-history 保留的关键帧
 ```
 
-刚保存时 PCD 与 `/cloud_registered` 使用相同数值坐标，`map` 与点云源坐标系按单位变换记录。PGM/YAML 默认用 `Z=0.05–1.50 m` 的切片生成；二维图的有点栅格为占用，其余栅格为空闲，与现有 `pcd2pgm` 的投影语义一致。自定义 map 基准后，PCD 点、二维栅格和 terrain 都处于同一个 `map` 坐标系，YAML 栅格 yaw 保持为 0，以兼容只接收 `origin_x/origin_y` 的 HW terrain server。
+刚保存时 PCD 与 `/cloud_registered` 使用相同数值坐标，`map` 与点云源坐标系按单位变换记录。保存只写 `<地图名称>.pcd`；PGM/YAML 由“点云转二维图”按当时的切片参数生成。默认先拟合主地面，再保留相对地面 `0.05–1.50 m` 的点向 XY 平面投影；仅在选择「全局 Z」时，上下限才是原始点云的绝对 Z。完整 PCD 始终保存关键帧离线清理后的所有保留点，地面拟合和切片都不会改写它。二维图的有点栅格为占用，其余栅格为空闲，与现有 `pcd2pgm` 的投影语义一致。自定义 map 基准后，PCD 点、二维栅格和 terrain 都处于同一个 `map` 坐标系，YAML 栅格 yaw 保持为 0，以兼容只接收 `origin_x/origin_y` 的 HW terrain server。
 
 ## 常用参数
 
@@ -95,6 +186,7 @@ data/
   --cloud-topic /cloud_registered \
   --odom-topic /Odometry \
   --voxel-size 0.05 \
+  --height-mode ground \
   --z-min 0.05 \
   --z-max 1.50 \
   --map-resolution 0.05 \
@@ -107,11 +199,35 @@ data/
 | `--max-points` | `5000000` | 后端累计点数硬上限 |
 | `--web-max-points` | `220000` | 每次发给网页显示的最大点数，不影响保存精度 |
 | `--ros-max-points` | `500000` | `/mapping/accumulated_cloud` 单帧最大点数 |
-| `--z-min` / `--z-max` | `0.05` / `1.50` | 生成二维地图时保留的高度范围 |
+| `--dynamic-removal` / `--no-dynamic-removal` | 开启 | 开启或禁用基于可见空闲的拖影清理 |
+| `--dynamic-miss-threshold` | `5` | 体素被多少个不同处理帧判空后才删除；越大越保守 |
+| `--dynamic-min-range` / `--dynamic-max-range` | `0.38` / `10.0` | 去动态射线距离范围（米） |
+| `--dynamic-removal-rate` | `3.0` | 后台可见性处理最高频率（Hz） |
+| `--dynamic-max-rays` | `4000` | 每个处理帧的角度均匀射线上限 |
+| `--dynamic-odom-tolerance` | `0.12` | 点云与里程计时间戳允许的最大差值（秒） |
+| `--keyframe-history` / `--no-keyframe-history` | 开启 | 记录磁盘关键帧并在保存时回放去动态 |
+| `--keyframe-translation` / `--keyframe-rotation-deg` | `0.10` / `5.0` | 位移/旋转关键帧阈值 |
+| `--keyframe-min-interval` / `--keyframe-max-interval` | `0.20` / `0.75` | 关键帧最小间隔和静止时最长间隔（秒） |
+| `--keyframe-max-rays` / `--keyframe-chunk-frames` | `4000` / `64` | 每关键帧射线上限与每个原子 chunk 帧数 |
+| `--keyframe-max-disk-gb` | `2.0` | 单会话关键帧历史硬上限 |
+| `--keyframe-free-threshold` / `--keyframe-free-hit-ratio` | `5` / `2.0` | 离线删除的最小判空帧数与 free/hit 比例 |
+| `--keyframe-max-removal-fraction` | `0.35` | 单次离线清理可删除的全图最大比例 |
+| `--polar-disappearance-filter` / `--no-polar-disappearance-filter` | 开启 | 保存时启用/关闭 ERASOR 风格极坐标格消失投票；关闭后仅用射线回放 |
+| `--polar-min-range` / `--polar-max-range` | `0.4` / `10.0` | 极坐标比较的有效距离范围（米） |
+| `--polar-rings` / `--polar-sectors` | `10` / `72` | 极坐标网格环数与扇区数；越细越灵敏，也更容易受稀疏回波影响 |
+| `--polar-cell-size` / `--polar-min-votes` | `0.2` / `2` | 投票用全局体素格尺寸与删除候选至少所需的负票数 |
+| `--polar-scan-ratio-threshold` | `0.25` | 当前扫描与地图的高度跨度比例阈值；越小越保守 |
+| `--polar-structure-span` / `--polar-height-threshold` | `0.5` / `0.4` | 候选结构最小高度跨度及其相对局部地面的最小高度（米） |
+| `--polar-max-removal-fraction` | `0.20` | 极坐标投票本身最多可删除当前输入的比例；之后仍受总安全上限限制 |
+| `--keep-keyframe-history` | 关闭 | 成功导出后保留关键帧 `.history` 目录 |
+| `--height-mode` | `ground` | 二维投影高度基准；`ground` 自动拟合倾斜地面，`absolute` 使用原始全局 Z |
+| `--z-min` / `--z-max` | `0.05` / `1.50` | 障碍切片高度范围；`ground` 模式下为相对拟合地面的高度，`absolute` 模式下为全局 Z |
 | `--radius-filter` | `0.50` | 二维切片离群点滤波半径；设为 `0` 可关闭 |
 | `--min-neighbors` | `10` | 半径内最少邻点数 |
 | `--output-dir` | `./data` | PCD 和地图输出根目录 |
 | `--lio-params` | 导航仓库中的参数 YAML | 驱动与 LIO 共用的参数文件 |
+| `--local-lio-source` | `./ros2_ws/src/small_point_lio` | 项目内 LIO 源码目录，用于检查是否需要重新构建 |
+| `--local-lio-executable` | `./ros2_ws/install/.../small_point_lio_node` | 网页启动的项目内 LIO 可执行文件 |
 | `--no-stack-control` | 关闭 | 禁用网页启动/停止 ROS 节点的能力 |
 | `--no-browser` | 关闭 | 仅启动后端，不自动打开网页；此参数由 `run.sh` 消费，不传给 ROS 后端 |
 
@@ -125,7 +241,7 @@ data/
 发布  /mapping/accumulated_cloud   sensor_msgs/msg/PointCloud2
 发布  /mapping/status              std_msgs/msg/String（JSON）
 服务  /mapping/start               std_srvs/srv/Trigger
-服务  /mapping/stop_and_save       std_srvs/srv/Trigger
+服务  /mapping/stop_and_save       std_srvs/srv/Trigger（只写三维 PCD）
 服务  /mapping/reset               std_srvs/srv/Trigger
 ```
 
@@ -147,9 +263,12 @@ ros2 service call /mapping/reset std_srvs/srv/Trigger '{}'
 cd /home/mas/mapping_web_ui
 python3 -m unittest discover -s tests -v
 node tests/editor_pointer_harness.mjs
+node tests/app_status_harness.mjs
 ```
 
 `tests/editor_pointer_harness.mjs` 用一个极简 DOM 桩加载真实的 `web/map-editor.js`，回放取帧的按下、平移、转向手势，因此不需要浏览器或构建工具即可回归地图编辑器的指针交互。
+
+`tests/app_status_harness.mjs` 用 DOM、WebSocket、fetch 桩加载真实的 `web/app.js`，经 HTTP 轮询与 WebSocket 推送回放状态序列，并覆盖自助二维切片：默认参数来自 `status.map_export`、操作者改动不被轮询覆盖、PGM 预览解码与统计行、转换请求体、以及保存指令不再带 `z_max`。
 
 暂时没有连接雷达时，可以在控制台点击“开始建图”后，用合成房间点云检查完整链路：
 
@@ -167,7 +286,8 @@ curl http://127.0.0.1:8765/api/status
 
 - “点云输入”显示无数据：先检查 `/cloud_registered` 是否在发布，以及 ROS Domain ID 是否一致。
 - 网页能连但点数不增长：必须先点击“开始建图”；待机状态不会累计，以免常驻占内存。
-- 二维地图保存失败：通常是 `z-min/z-max` 切片后没有点，按雷达安装高度调整范围。
+- 二维切片预览报错“切片后只有 N 个点”：调整“点云转二维图”里的 `Z 下限/上限` 重新预览，按雷达安装高度取值。
+- 保存后只看到 PCD：这是预期行为。二维图不再随保存生成，请在“点云转二维图”里按需生成 PGM/YAML。
 - 累计点数达到上限：结束保存，或在内存允许时增大 `--max-points`；不要盲目减小体素尺寸。
 
 ## 文件结构
@@ -179,5 +299,6 @@ backend/map_frame_core.py   PCD/二维/terrain 成组坐标变换与 frame 元�
 backend/terrain_core.py     PGM 编辑、二维转 terrain、MessagePack 读写
 web/                       无外部 CDN 的网页前端与 WebGL 3D 查看器
 tests/                     核心数据路径测试
+ros2_ws/src/small_point_lio 项目内的 Small Point-LIO ROS 2 源码副本
 run.sh                     ROS 环境加载与一键启动脚本
 ```

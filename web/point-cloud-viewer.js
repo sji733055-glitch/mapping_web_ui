@@ -133,6 +133,8 @@
       if (this.canvas.width!==w || this.canvas.height!==h) { this.canvas.width=w; this.canvas.height=h; this.gl.viewport(0,0,w,h); this.needsRender=true; }
     }
 
+    resize() { this._resize(); }
+
     setPoints(points) {
       this.points=points;
       const gl=this.gl; gl.bindBuffer(gl.ARRAY_BUFFER,this.pointBuffer); gl.bufferData(gl.ARRAY_BUFFER,points,gl.DYNAMIC_DRAW);

@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAV_WORKSPACE="${MAS_NAV_WORKSPACE:-/home/mas/mas_nav_2027_native}"
+LOCAL_ROS_WORKSPACE="${PROJECT_ROOT}/ros2_ws"
 OPEN_BROWSER=true
 WEB_HOST="0.0.0.0"
 WEB_PORT="8765"
@@ -61,6 +62,12 @@ if [[ -f "${NAV_WORKSPACE}/install/setup.bash" ]]; then
   # shellcheck disable=SC1090
   source "${NAV_WORKSPACE}/install/setup.bash"
 fi
+if [[ -f "${LOCAL_ROS_WORKSPACE}/install/setup.bash" ]]; then
+  # Source last so a locally built small_point_lio overrides the navigation
+  # workspace package without modifying that workspace.
+  # shellcheck disable=SC1090
+  source "${LOCAL_ROS_WORKSPACE}/install/setup.bash"
+fi
 set -u
 
 mkdir -p "${PROJECT_ROOT}/.ros/log" "${PROJECT_ROOT}/data/pcd" "${PROJECT_ROOT}/data/map"
@@ -74,6 +81,26 @@ elif [[ "${URL_HOST}" == *:* && "${URL_HOST}" != \[*\] ]]; then
   URL_HOST="[${URL_HOST}]"
 fi
 CONSOLE_URL="http://${URL_HOST}:${WEB_PORT}"
+
+# 浏览器通常不在本机运行（VS Code Remote SSH 转发或局域网直连）。复制 127.0.0.1
+# 到别的电脑上只会指向那台电脑自己，所以这里额外给出本机在局域网中的地址。
+LAN_URL=""
+if [[ -z "${WEB_HOST}" || "${WEB_HOST}" == "0.0.0.0" || "${WEB_HOST}" == "::" ]]; then
+  SSH_PEER="${SSH_CONNECTION:-}"
+  SSH_PEER="${SSH_PEER%% *}"
+  if [[ -n "${SSH_PEER}" ]] && command -v ip >/dev/null 2>&1; then
+    LAN_IP="$(ip route get "${SSH_PEER}" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
+    if [[ -n "${LAN_IP}" ]]; then
+      LAN_URL="http://${LAN_IP}:${WEB_PORT}"
+    fi
+  fi
+fi
+
+print_access_hint() {
+  if [[ -n "${LAN_URL}" ]]; then
+    echo "同一网络的其他电脑请访问：${LAN_URL}（复制 ${CONSOLE_URL} 只有这台机器自己能打开）"
+  fi
+}
 
 open_console_url() {
   local url="$1"
@@ -102,17 +129,21 @@ if [[ "${OPEN_BROWSER}" == true ]]; then
     for _attempt in {1..60}; do
       if python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=0.4).read(1)' "${STATUS_URL}" >/dev/null 2>&1; then
         echo "网页已就绪：${CONSOLE_URL}"
+        print_access_hint
         if ! open_console_url "${CONSOLE_URL}"; then
           echo "未检测到可用的浏览器打开方式，请手动访问 ${CONSOLE_URL}" >&2
+          print_access_hint
         fi
         exit 0
       fi
       sleep 0.25
     done
     echo "后端启动后未能自动打开网页，请手动访问 ${CONSOLE_URL}" >&2
+    print_access_hint
   ) &
 else
   echo "自动打开浏览器已关闭；服务启动后请访问 ${CONSOLE_URL}"
+  print_access_hint
 fi
 
 exec python3 "${PROJECT_ROOT}/backend/mapping_server.py" "${BACKEND_ARGS[@]}"

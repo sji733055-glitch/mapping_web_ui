@@ -882,6 +882,9 @@
   });
 
   window.addEventListener("resize", resizeCanvas);
+  window.addEventListener("mapping-map-list-changed", () => {
+    if (!dom.editorWorkspace.hidden || state.mapsLoaded) void refreshMaps();
+  });
   if (window.ResizeObserver) new ResizeObserver(resizeCanvas).observe(dom.canvasWrap);
   buildPalette(); updateEditorUi(); updateSourceControls(); resizeCanvas();
 })();
