@@ -837,6 +837,8 @@ class MapExportConfig:
     min_neighbors: int = 10
     padding: float = 0.25
     height_mode: str = "absolute"
+    filter_mode: str = "radius"
+    filter_voxel_size: float = 0.10
 
     def validate(self) -> None:
         values = (
@@ -845,6 +847,7 @@ class MapExportConfig:
             self.z_max,
             self.radius,
             self.padding,
+            self.filter_voxel_size,
         )
         if not all(math.isfinite(value) for value in values):
             raise ValueError("地图导出参数必须是有限数值")
@@ -856,6 +859,10 @@ class MapExportConfig:
             raise ValueError("滤波半径、邻点数和地图留白不能为负数")
         if self.height_mode not in {"ground", "absolute"}:
             raise ValueError("高度基准必须是 ground 或 absolute")
+        if self.filter_mode not in {"voxel", "radius", "none"}:
+            raise ValueError("离群点滤波模式必须是 voxel、radius 或 none")
+        if not 0.02 <= self.filter_voxel_size <= 1.0:
+            raise ValueError("结构体素尺寸必须在 0.02–1.0 m 之间")
 
 
 def resolve_pcd_input(directory: Path, name: str) -> Path:
@@ -1353,6 +1360,84 @@ def _radius_filter(points: np.ndarray, radius: float, minimum: int) -> np.ndarra
     return points[keep]
 
 
+def _voxel_structure_filter(
+    points: np.ndarray,
+    voxel_size: float,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Remove unsupported single voxels using ROGMap-style column classes.
+
+    A saved PCD does not contain the per-ray hit/miss history required to
+    reproduce ROGMap's probabilistic ``OCCUPIED / KNOWN_FREE / UNKNOWN`` state.
+    What *is* available offline is its projection-layer idea: classify occupied
+    3-D voxels by their XY column and inspect the eight neighboring columns.
+
+    A column is retained when it contains at least two occupied Z voxels
+    (vertical structure such as a wall or pole), or when another occupied XY
+    column touches it (horizontal support such as a curb or thin rail).  Only a
+    truly isolated, single-Z-voxel column is discarded.  Classification is
+    performed on unique voxels, so point density cannot make one noisy return
+    look like structure merely because the same voxel contains many points.
+    """
+    source = np.asarray(points, dtype=np.float32)
+    if not len(source):
+        return source, {
+            "filter_voxels": 0,
+            "filter_columns": 0,
+            "filter_kept_columns": 0,
+            "filter_removed_columns": 0,
+            "filter_removed_points": 0,
+        }
+
+    voxel_xyz = voxel_coordinates(source, voxel_size)
+    unique_voxels, point_voxels = np.unique(voxel_xyz, axis=0, return_inverse=True)
+    columns, voxel_columns, vertical_counts = np.unique(
+        unique_voxels[:, :2], axis=0, return_inverse=True, return_counts=True
+    )
+
+    column_min = columns.min(axis=0)
+    local_columns = columns - column_min
+    width = int(local_columns[:, 0].max()) + 1
+    height = int(local_columns[:, 1].max()) + 1
+    if width > np.iinfo(np.int64).max // max(1, height):
+        raise ValueError("点云坐标范围过大，无法进行结构体素分类")
+
+    column_ids = local_columns[:, 1] * width + local_columns[:, 0]
+    order = np.argsort(column_ids)
+    sorted_ids = column_ids[order]
+    sorted_xy = local_columns[order]
+    has_neighbor_sorted = np.zeros(len(columns), dtype=bool)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            valid = (
+                (sorted_xy[:, 0] + dx >= 0)
+                & (sorted_xy[:, 0] + dx < width)
+                & (sorted_xy[:, 1] + dy >= 0)
+                & (sorted_xy[:, 1] + dy < height)
+            )
+            valid_indices = np.flatnonzero(valid)
+            targets = sorted_ids[valid_indices] + dy * width + dx
+            positions = np.searchsorted(sorted_ids, targets)
+            found = positions < len(sorted_ids)
+            found[found] &= sorted_ids[positions[found]] == targets[found]
+            has_neighbor_sorted[valid_indices[found]] = True
+
+    has_neighbor = np.zeros(len(columns), dtype=bool)
+    has_neighbor[order] = has_neighbor_sorted
+    keep_columns = (vertical_counts >= 2) | has_neighbor
+    point_columns = voxel_columns[point_voxels]
+    keep_points = keep_columns[point_columns]
+    filtered = np.ascontiguousarray(source[keep_points], dtype=np.float32)
+    return filtered, {
+        "filter_voxels": int(len(unique_voxels)),
+        "filter_columns": int(len(columns)),
+        "filter_kept_columns": int(np.count_nonzero(keep_columns)),
+        "filter_removed_columns": int(np.count_nonzero(~keep_columns)),
+        "filter_removed_points": int(len(source) - len(filtered)),
+    }
+
+
 def estimate_ground_plane(points: np.ndarray) -> tuple[np.ndarray, dict[str, float | int]]:
     """Estimate the dominant traversable ground as ``z = ax + by + c``.
 
@@ -1495,8 +1580,24 @@ def slice_points_to_occupancy(
             f"{reference}={config.z_min:.2f}–{config.z_max:.2f} m 切片后只有 "
             f"{len(sliced)} 个点，无法生成二维地图"
         )
-    filtered = _radius_filter(sliced, config.radius, config.min_neighbors)
+    filter_metadata: dict[str, float | int | str] = {
+        "filter_mode": config.filter_mode,
+        "filter_removed_points": 0,
+    }
+    if config.filter_mode == "voxel":
+        filtered, voxel_metadata = _voxel_structure_filter(
+            sliced, config.filter_voxel_size
+        )
+        filter_metadata.update(voxel_metadata)
+        filter_metadata["filter_voxel_size"] = config.filter_voxel_size
+    elif config.filter_mode == "radius":
+        filtered = _radius_filter(sliced, config.radius, config.min_neighbors)
+        filter_metadata["filter_removed_points"] = int(len(sliced) - len(filtered))
+    else:
+        filtered = sliced
     if len(filtered) < 3:
+        if config.filter_mode == "voxel":
+            raise ValueError("结构体素滤波后没有足够点，请减小体素尺寸或改用半径滤波")
         raise ValueError("离群点滤波后没有足够点，请减小 min_neighbors 或扩大 radius")
 
     minimum = filtered[:, :2].min(axis=0) - config.padding
@@ -1517,6 +1618,7 @@ def slice_points_to_occupancy(
         "origin_x": float(minimum[0]), "origin_y": float(minimum[1]),
         "z_min": config.z_min, "z_max": config.z_max,
         "slice_points": int(len(sliced)), "filtered_points": int(len(filtered)),
+        **filter_metadata,
         **height_metadata,
     }
 

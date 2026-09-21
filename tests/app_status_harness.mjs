@@ -119,6 +119,7 @@ const previewHeaders = () => new Map([
   ["X-Map-Resolution", "0.05"], ["X-Map-Origin-X", "-1"], ["X-Map-Origin-Y", "-2"],
   ["X-Map-Height-Mode", "ground"],
   ["X-Map-Ground-Tilt", "2.17"],
+  ["X-Map-Filter-Mode", "voxel"], ["X-Map-Filter-Removed", "37"],
   ["X-Map-Slice-Points", "900"], ["X-Map-Occupied", "3"], ["X-Map-Preview-Stride", "1"],
 ]);
 
@@ -256,14 +257,22 @@ const fire = (id, type) => {
   handlers[handlers.length - 1]();
 };
 
-const sliceDefaults = { resolution: 0.05, z_min: 0.05, z_max: 1.5, radius: 0.5, min_neighbors: 10, padding: 0.25, height_mode: "ground" };
+const sliceDefaults = { resolution: 0.05, z_min: 0.05, z_max: 1.5, radius: 0.5, min_neighbors: 10, padding: 0.25, height_mode: "ground", filter_mode: "voxel", filter_voxel_size: 0.1 };
 
 console.log("7. 二维切片参数以后端默认值为准，且不覆盖操作者的改动");
 await renderVia(status({ state: "IDLE", map_export: sliceDefaults }));
 check("默认 Z 上限来自 status", byId("pcd-z-max").value === "1.5", `value=${byId("pcd-z-max").value}`);
 check("默认使用自动地面基准", byId("pcd-height-mode").value === "ground", `value=${byId("pcd-height-mode").value}`);
+check("默认使用结构体素滤波", byId("pcd-filter-mode").value === "voxel", `value=${byId("pcd-filter-mode").value}`);
+check("默认结构体素尺寸来自 status", byId("pcd-filter-voxel-size").value === "0.1", `value=${byId("pcd-filter-voxel-size").value}`);
 check("默认分辨率来自 status", byId("pcd-resolution").value === "0.05", `value=${byId("pcd-resolution").value}`);
 check("默认最小邻点来自 status", byId("pcd-min-neighbors").value === "10", `value=${byId("pcd-min-neighbors").value}`);
+check("体素模式禁用半径参数", byId("pcd-radius").disabled === true && byId("pcd-min-neighbors").disabled === true);
+byId("pcd-filter-mode").value = "radius";
+fire("pcd-filter-mode", "change");
+check("半径模式启用半径参数", byId("pcd-radius").disabled === false && byId("pcd-min-neighbors").disabled === false && byId("pcd-filter-voxel-size").disabled === true);
+byId("pcd-filter-mode").value = "voxel";
+fire("pcd-filter-mode", "change");
 byId("pcd-z-max").value = "2.5";
 fire("pcd-z-max", "input");
 await renderVia(status({ state: "IDLE", map_export: sliceDefaults }));
@@ -278,9 +287,9 @@ fire("pcd-file-select", "change");
 click("pcd-map-preview-button");
 await settle();
 const previewBody = posted.at(-1)?.body || {};
-check("预览请求使用当前参数", previewBody.map_name === "venue_map" && previewBody.height_mode === "ground" && previewBody.z_min === 0.05 && previewBody.resolution === 0.05, JSON.stringify(previewBody));
+check("预览请求使用当前参数", previewBody.map_name === "venue_map" && previewBody.height_mode === "ground" && previewBody.filter_mode === "voxel" && previewBody.filter_voxel_size === 0.1 && previewBody.z_min === 0.05 && previewBody.resolution === 0.05, JSON.stringify(previewBody));
 const stats = byId("pcd-map-preview-stats").textContent;
-check("统计行给出地面校正、栅格与占据格数", stats.includes("地面倾斜 2.17° 已校正") && stats.includes("4 × 3 px") && stats.includes("占据 3 格"), stats);
+check("统计行给出地面校正、体素去除、栅格与占据格数", stats.includes("地面倾斜 2.17° 已校正") && stats.includes("体素去除 37 点") && stats.includes("4 × 3 px") && stats.includes("占据 3 格"), stats);
 check("预览面板展开", byId("pcd-map-preview-wrap").hidden === false);
 check("状态行提示切片完成", byId("pcd-convert-status").textContent.includes("切片完成"), byId("pcd-convert-status").textContent);
 
@@ -289,7 +298,7 @@ byId("pcd-output-name").value = "venue_slice";
 click("pcd-convert-button");
 await settle();
 const convertBody = posted.at(-1)?.body || {};
-check("转换请求带切片参数", convertBody.height_mode === "ground" && convertBody.resolution === 0.05 && convertBody.min_neighbors === 10 && convertBody.z_max === 1.5, JSON.stringify(convertBody));
+check("转换请求带切片参数", convertBody.height_mode === "ground" && convertBody.filter_mode === "voxel" && convertBody.filter_voxel_size === 0.1 && convertBody.resolution === 0.05 && convertBody.min_neighbors === 10 && convertBody.z_max === 1.5, JSON.stringify(convertBody));
 check("转换请求带输出名", convertBody.output_name === "venue_slice", JSON.stringify(convertBody));
 check("转换结果写回状态行", byId("pcd-convert-status").textContent === "点云已转换", byId("pcd-convert-status").textContent);
 

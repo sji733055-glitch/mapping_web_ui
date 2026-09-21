@@ -1,5 +1,12 @@
 # Change history
 
+## 2026-09-21 — 二维投影新增 ROGMap 风格的结构体素杂点滤波
+
+- 核心行为：`backend/mapping_core.py` 新增离线结构体素分类。切片点先按可配置的三维体素去重，再按 XY 列分类：同列占有至少两个 Z 体素的垂直结构保留，有任一八邻域占据列支撑的水平结构也保留，只删除没有垂直或水平支撑的孤立单体素列。分类使用唯一占据体素而非原始点数，避免近处高密度单体素被误当成结构，同时保护细墙、路沿和杆状障碍。该策略借鉴 ROGMap 投影层的体素列/八邻域思路；因最终 PCD 不含逐射线 hit/miss 时序，没有冒充完整的 `OCCUPIED / KNOWN_FREE / UNKNOWN` 概率分类。
+- 参数、传输与界面：`MapExportConfig` 新增 `filter_mode`（`voxel`/`radius`/`none`）与 `filter_voxel_size`（0.02–1.0 m）；`backend/mapping_server.py` 默认使用 `voxel` + 0.10 m，新增 `--map-filter-mode` / `--map-filter-voxel-size`，并通过 `status.map_export`、预览/转换请求与 `X-Map-Filter-*` 响应头传递模式、删除点数及体素列统计。`web/index.html` / `web/app.js` 增加“结构体素（推荐）/半径邻域（兼容）/不滤波”选择和体素尺寸，自动禁用非当前模式的参数，二维预览统计直接显示去除点数；半径滤波和完全关闭均保留为可回退模式。预览和最终 PGM/YAML 继续共用同一栅格化函数。`README.md` 同步算法边界、API 和启动参数。
+- 测试：`tests/test_mapping_core.py` 覆盖“同一孤立体素内多点仍删除”、水平相邻单体素保留、孤立垂直多 Z 体素保留、输入不被修改、元数据和预览/写盘像素一致；`tests/test_mapping_server.py` 覆盖 override 校验与响应头；`tests/app_status_harness.mjs` 覆盖默认值、模式联动禁用、预览/转换请求与删除统计显示。
+- 验证（全通过）：`python3 -m compileall -q backend tests`、`python3 -m unittest discover -s tests -v`（48 项）、三个 `node --check`、`node tests/editor_pointer_harness.mjs`、`node tests/app_status_harness.mjs`、`bash -n run.sh` 和 `git diff --check`。未连接真实雷达，未启动 ROS 建图链，也未用真实浏览器对大型 PCD 做视觉/性能验收；鉴于本轮机器曾因无关的 `gevfilter` 内核模块页错误重启，本次只运行了有界的纯单元/无头前端验证，未触发硬件链路或整张 `lab_map.pcd` 预览。
+
 ## 2026-09-21 — 二维投影按拟合地面校正高度
 
 - 根因与行为变更：原有二维转换只能用全图统一的绝对 Z 窗口，LIO 输出有轻微俯仰/横滚偏差时，远处地面会进入障碍切片并在 PGM 中变黑。现在默认使用 `ground` 高度基准：在 0.5 m XY 网格内取低位高度样本，通过确定性 RANSAC 拟合主地面 `z=ax+by+c`，然后用每个完整 PCD 点相对该平面的高度做切片。拟合阶段最多均匀取 500,000 点以约束多百万点会话的峰值内存，平面仍应用到全部点；原 PCD 不会被变换或改写。半径滤波同时从 SciPy `workers=-1` 改为单 worker + 50,000 点分块，不改变精确邻域判定，但避免一次预览占满全部 CPU 而令本地/远程操作面假死。`absolute` 模式保留旧的全局 Z 语义，拟合样本不足、无稳定平面或地面倾斜超过 20° 时会明确提示切换。核心实现位于 `backend/mapping_core.py`。

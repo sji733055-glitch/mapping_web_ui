@@ -11,7 +11,7 @@
     lidarDot: $("lidar-dot"), lidarStatus: $("lidar-status"), odomDot: $("odom-dot"), odomStatus: $("odom-status"), storageDot: $("storage-dot"), storageStatus: $("storage-status"), dynamicRemovalDot: $("dynamic-removal-dot"), dynamicRemovalStatus: $("dynamic-removal-status"),
     outputCard: $("output-card"), outputPath: $("output-path"), saveProgress: $("save-progress"), saveProgressBar: $("save-progress-bar"), saveStage: $("save-stage"),
     pcdSelect: $("pcd-file-select"), pcdRefresh: $("pcd-refresh-button"), pcdConvert: $("pcd-convert-button"), pcdStatus: $("pcd-convert-status"), pcdLook: $("pcd-look-button"),
-    pcdHeightMode: $("pcd-height-mode"), pcdZMin: $("pcd-z-min"), pcdZMax: $("pcd-z-max"), pcdResolution: $("pcd-resolution"), pcdRadius: $("pcd-radius"),
+    pcdHeightMode: $("pcd-height-mode"), pcdFilterMode: $("pcd-filter-mode"), pcdFilterVoxelSize: $("pcd-filter-voxel-size"), pcdZMin: $("pcd-z-min"), pcdZMax: $("pcd-z-max"), pcdResolution: $("pcd-resolution"), pcdRadius: $("pcd-radius"),
     pcdMinNeighbors: $("pcd-min-neighbors"), pcdPadding: $("pcd-padding"), pcdOutputName: $("pcd-output-name"), pcdDefaults: $("pcd-defaults-button"),
     pcdMapPreview: $("pcd-map-preview-button"), pcdMapPreviewWrap: $("pcd-map-preview-wrap"), pcdMapPreviewCanvas: $("pcd-map-preview-canvas"), pcdMapPreviewStats: $("pcd-map-preview-stats"),
     previewToggle: $("preview-toggle-button"), previewPanel: $("preview-panel"), previewCanvas: $("preview-canvas"), previewSelect: $("preview-file-select"),
@@ -28,7 +28,7 @@
   const state = { socket:null, connected:false, reconnectTimer:null, previousStatus:null, cloudFrames:[], httpOnline:false, cloudPollBusy:false, pcdBusy:false, pcdFilesLoaded:false, previewViewer:null, previewOpen:false, previewLoaded:false, previewBusy:false, sessionName:"", exportDefaults:null, exportTouched:false, mapPreview:null, mapPreviewCanvas:null, mapPreviewName:"", mapView:null, mapDrag:null, mapPreviewBusy:false };
   const exportFields = [
     ["z_min", "pcdZMin"], ["z_max", "pcdZMax"], ["resolution", "pcdResolution"],
-    ["radius", "pcdRadius"], ["min_neighbors", "pcdMinNeighbors"], ["padding", "pcdPadding"]
+    ["filter_voxel_size", "pcdFilterVoxelSize"], ["radius", "pcdRadius"], ["min_neighbors", "pcdMinNeighbors"], ["padding", "pcdPadding"]
   ];
   const stateLabels = { IDLE:"待机", MAPPING:"建图中", SAVING:"保存中", SAVED:"已保存", ERROR:"异常" };
 
@@ -47,7 +47,13 @@
     dom.pcdDefaults.disabled=busy||blocked;
     dom.pcdOutputName.disabled=busy||blocked;
     dom.pcdHeightMode.disabled=busy||blocked;
+    dom.pcdFilterMode.disabled=busy||blocked;
     for (const [, field] of exportFields) dom[field].disabled=busy||blocked;
+    if (!busy&&!blocked) {
+      dom.pcdFilterVoxelSize.disabled=dom.pcdFilterMode.value!=="voxel";
+      dom.pcdRadius.disabled=dom.pcdFilterMode.value!=="radius";
+      dom.pcdMinNeighbors.disabled=dom.pcdFilterMode.value!=="radius";
+    }
   }
 
   function fillPcdSelect(select, files, previous) {
@@ -66,10 +72,12 @@
       if (Number.isFinite(value)) dom[field].value=String(value);
     }
     if (["ground","absolute"].includes(config.height_mode)) dom.pcdHeightMode.value=config.height_mode;
+    if (["voxel","radius","none"].includes(config.filter_mode)) dom.pcdFilterMode.value=config.filter_mode;
+    updatePcdControls();
   }
 
   function collectExportParams() {
-    const params={height_mode:dom.pcdHeightMode.value};
+    const params={height_mode:dom.pcdHeightMode.value,filter_mode:dom.pcdFilterMode.value};
     for (const [key, field] of exportFields) {
       const raw=String(dom[field].value??"").trim();
       if (raw==="") continue;
@@ -120,6 +128,8 @@
     if (meta.heightMode==="ground") parts.push(Number.isFinite(meta.groundTilt)?`地面倾斜 ${meta.groundTilt.toFixed(2)}° 已校正`:"已校正倾斜地面");
     if (Number.isFinite(meta.resolution)) parts.push(`分辨率 ${meta.resolution} m/px`);
     if (Number.isFinite(meta.slicePoints)) parts.push(`切片 ${formatNumber(meta.slicePoints)} 点`);
+    if (meta.filterMode==="voxel"&&Number.isFinite(meta.filterRemoved)) parts.push(`体素去除 ${formatNumber(meta.filterRemoved)} 点`);
+    else if (meta.filterMode==="radius"&&Number.isFinite(meta.filterRemoved)) parts.push(`半径滤波去除 ${formatNumber(meta.filterRemoved)} 点`);
     if (Number.isFinite(meta.occupied)) parts.push(`占据 ${formatNumber(meta.occupied)} 格`);
     if (Number.isFinite(meta.stride)&&meta.stride>1) parts.push(`显示降采样 ${meta.stride}×`);
     return parts.join(" · ");
@@ -247,6 +257,8 @@
       const meta={
         width:readPreviewHeader(headers,"X-Map-Width"), height:readPreviewHeader(headers,"X-Map-Height"),
         heightMode:headers.get("X-Map-Height-Mode"),
+        filterMode:headers.get("X-Map-Filter-Mode"),
+        filterRemoved:readPreviewHeader(headers,"X-Map-Filter-Removed"),
         groundTilt:readPreviewHeader(headers,"X-Map-Ground-Tilt"),
         resolution:readPreviewHeader(headers,"X-Map-Resolution"), slicePoints:readPreviewHeader(headers,"X-Map-Slice-Points"),
         occupied:readPreviewHeader(headers,"X-Map-Occupied"), stride:readPreviewHeader(headers,"X-Map-Preview-Stride")
@@ -461,14 +473,15 @@
     register({name:"stop_managed_ros_mapping_stack",title:"停止网页启动的建图节点",description:"停止由本网页后端启动的机器人 TF、MID360 驱动和 Small Point-LIO；不会停止外部终端启动的节点。",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},async execute(){return apiCommand("stop_stack");}});
     register({name:"start_mapping_session",title:"开始建图",description:"清空之前的内存累计点云，并以给定地图名称开始一个新的建图会话。",inputSchema:{type:"object",properties:{map_name:{type:"string",pattern:"^[A-Za-z0-9._-]{1,48}$",description:"保存地图时使用的文件名，不含扩展名。"}},required:["map_name"],additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},async execute(input){return apiCommand("start",String(input.map_name||""));}});
     register({name:"stop_mapping_and_save",title:"结束并保存点云",description:"结束当前建图会话，把完整累计点云写入 data/pcd/<名称>.pcd。二维 PGM/YAML 不随保存生成，需另行调用 convert_existing_pcd_to_pgm。",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},async execute(){return apiCommand("stop","");}});
-    register({name:"convert_existing_pcd_to_pgm",title:"将已有 PCD 转为 PGM",description:"把项目 data/pcd 下的 PCD 按给定切片参数生成 Nav2 PGM/YAML；不会覆盖已有地图，同名冲突时自动加时间戳。",inputSchema:{type:"object",properties:{map_name:{type:"string",pattern:"^[A-Za-z0-9._-]{1,48}$",description:"data/pcd 中的文件名，不含 .pcd。"},output_name:{type:"string",pattern:"^[A-Za-z0-9._-]{1,48}$",description:"输出地图名，省略时沿用点云名称。"},height_mode:{type:"string",enum:["ground","absolute"],description:"高度基准：ground 自动拟合倾斜地面（推荐），absolute 使用全局 Z。"},z_min:{type:"number",description:"障碍高度下限（米）。"},z_max:{type:"number",description:"障碍高度上限（米）。"},resolution:{type:"number",description:"栅格分辨率（米/格）。"},radius:{type:"number",description:"离群点滤波半径（米），0 表示关闭。"},min_neighbors:{type:"integer",description:"滤波半径内的最小邻点数，0 表示关闭。"},padding:{type:"number",description:"地图边缘留白（米）。"}},required:["map_name"],additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},async execute(input){return convertPcd(String(input.map_name||""),input);}});
-    register({name:"preview_pcd_occupancy_map",title:"预览 PCD 二维切片",description:"按给定切片参数在内存中生成二维栅格并返回尺寸、占据格数与元数据；不写入任何文件，用于生成前确认切片是否合适。",inputSchema:{type:"object",properties:{map_name:{type:"string",pattern:"^[A-Za-z0-9._-]{1,48}$",description:"data/pcd 中的文件名，不含 .pcd。"},height_mode:{type:"string",enum:["ground","absolute"],description:"高度基准：ground 自动拟合倾斜地面（推荐），absolute 使用全局 Z。"},z_min:{type:"number",description:"障碍高度下限（米）。"},z_max:{type:"number",description:"障碍高度上限（米）。"},resolution:{type:"number",description:"栅格分辨率（米/格）。"},radius:{type:"number",description:"离群点滤波半径（米）。"},min_neighbors:{type:"integer",description:"滤波半径内的最小邻点数。"},padding:{type:"number",description:"地图边缘留白（米）。"}},required:["map_name"],additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:false},async execute(input){return previewPcd(String(input.map_name||""),input);}});
+    register({name:"convert_existing_pcd_to_pgm",title:"将已有 PCD 转为 PGM",description:"把项目 data/pcd 下的 PCD 按给定切片参数生成 Nav2 PGM/YAML；不会覆盖已有地图，同名冲突时自动加时间戳。",inputSchema:{type:"object",properties:{map_name:{type:"string",pattern:"^[A-Za-z0-9._-]{1,48}$",description:"data/pcd 中的文件名，不含 .pcd。"},output_name:{type:"string",pattern:"^[A-Za-z0-9._-]{1,48}$",description:"输出地图名，省略时沿用点云名称。"},height_mode:{type:"string",enum:["ground","absolute"],description:"高度基准：ground 自动拟合倾斜地面（推荐），absolute 使用全局 Z。"},filter_mode:{type:"string",enum:["voxel","radius","none"],description:"离群点滤波：voxel 结构体素（推荐），radius 半径邻域，none 关闭。"},filter_voxel_size:{type:"number",description:"结构体素尺寸（米）。"},z_min:{type:"number",description:"障碍高度下限（米）。"},z_max:{type:"number",description:"障碍高度上限（米）。"},resolution:{type:"number",description:"栅格分辨率（米/格）。"},radius:{type:"number",description:"半径模式的滤波半径（米）。"},min_neighbors:{type:"integer",description:"半径模式的最小邻点数。"},padding:{type:"number",description:"地图边缘留白（米）。"}},required:["map_name"],additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},async execute(input){return convertPcd(String(input.map_name||""),input);}});
+    register({name:"preview_pcd_occupancy_map",title:"预览 PCD 二维切片",description:"按给定切片参数在内存中生成二维栅格并返回尺寸、占据格数与元数据；不写入任何文件，用于生成前确认切片是否合适。",inputSchema:{type:"object",properties:{map_name:{type:"string",pattern:"^[A-Za-z0-9._-]{1,48}$",description:"data/pcd 中的文件名，不含 .pcd。"},height_mode:{type:"string",enum:["ground","absolute"],description:"高度基准：ground 自动拟合倾斜地面（推荐），absolute 使用全局 Z。"},filter_mode:{type:"string",enum:["voxel","radius","none"],description:"离群点滤波：voxel 结构体素（推荐），radius 半径邻域，none 关闭。"},filter_voxel_size:{type:"number",description:"结构体素尺寸（米）。"},z_min:{type:"number",description:"障碍高度下限（米）。"},z_max:{type:"number",description:"障碍高度上限（米）。"},resolution:{type:"number",description:"栅格分辨率（米/格）。"},radius:{type:"number",description:"半径模式的滤波半径（米）。"},min_neighbors:{type:"integer",description:"半径模式的最小邻点数。"},padding:{type:"number",description:"地图边缘留白（米）。"}},required:["map_name"],additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:false},async execute(input){return previewPcd(String(input.map_name||""),input);}});
   }
 
   function sliceParams(input={}) {
     const payload={};
     if(["ground","absolute"].includes(input?.height_mode)) payload.height_mode=input.height_mode;
-    for(const key of ["z_min","z_max","resolution","radius","min_neighbors","padding"]){ const value=Number(input?.[key]); if(Number.isFinite(value)) payload[key]=value; }
+    if(["voxel","radius","none"].includes(input?.filter_mode)) payload.filter_mode=input.filter_mode;
+    for(const key of ["z_min","z_max","resolution","filter_voxel_size","radius","min_neighbors","padding"]){ const value=Number(input?.[key]); if(Number.isFinite(value)) payload[key]=value; }
     return payload;
   }
 
@@ -491,7 +504,7 @@
     if(!grid) throw new Error("二维预览数据不是有效的 PGM (P5)");
     const headers=response.headers;
     return {
-      map_name:mapName, height_mode:headers.get("X-Map-Height-Mode"), ground_tilt_deg:readPreviewHeader(headers,"X-Map-Ground-Tilt"), width:readPreviewHeader(headers,"X-Map-Width"), height:readPreviewHeader(headers,"X-Map-Height"),
+      map_name:mapName, height_mode:headers.get("X-Map-Height-Mode"), filter_mode:headers.get("X-Map-Filter-Mode"), filter_removed_points:readPreviewHeader(headers,"X-Map-Filter-Removed"), ground_tilt_deg:readPreviewHeader(headers,"X-Map-Ground-Tilt"), width:readPreviewHeader(headers,"X-Map-Width"), height:readPreviewHeader(headers,"X-Map-Height"),
       resolution:readPreviewHeader(headers,"X-Map-Resolution"), origin_x:readPreviewHeader(headers,"X-Map-Origin-X"),
       origin_y:readPreviewHeader(headers,"X-Map-Origin-Y"), z_min:readPreviewHeader(headers,"X-Map-Z-Min"),
       z_max:readPreviewHeader(headers,"X-Map-Z-Max"), slice_points:readPreviewHeader(headers,"X-Map-Slice-Points"),
@@ -532,6 +545,7 @@
   dom.pcdLook.addEventListener("click",()=>{ const name=dom.pcdSelect.value; if(!name)return; dom.previewSelect.value=name; setPreviewOpen(true); updatePreviewControls(); loadPreviewCloud(collectSliceFilter()); });
   for (const [, field] of exportFields) dom[field].addEventListener("input",()=>{ state.exportTouched=true; });
   dom.pcdHeightMode.addEventListener("change",()=>{ state.exportTouched=true; });
+  dom.pcdFilterMode.addEventListener("change",()=>{ state.exportTouched=true; updatePcdControls(); });
   dom.startStack.addEventListener("click",()=>send("start_stack")); dom.stopStack.addEventListener("click",()=>send("stop_stack"));
   dom.previewToggle.addEventListener("click",()=>setPreviewOpen(!state.previewOpen));
   dom.previewClose.addEventListener("click",()=>setPreviewOpen(false));

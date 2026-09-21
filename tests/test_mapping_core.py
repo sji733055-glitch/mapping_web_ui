@@ -15,6 +15,7 @@ from backend.mapping_core import (
     PREVIEW_MAX_PIXELS,
     VoxelAccumulator,
     _radius_filter,
+    _voxel_structure_filter,
     build_cloud_frame,
     build_pcd_map_preview,
     convert_pcd_to_map,
@@ -29,6 +30,7 @@ from backend.mapping_core import (
     sanitize_map_name,
     slice_by_height,
     slice_points_by_config,
+    slice_points_to_occupancy,
     visibility_miss_keys,
     voxel_keys,
     write_binary_pcd,
@@ -302,6 +304,65 @@ class MappingCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ground 或 absolute"):
             MapExportConfig(height_mode="local").validate()
 
+    def test_export_config_validates_structure_voxel_filter(self):
+        for mode in ("voxel", "radius", "none"):
+            MapExportConfig(filter_mode=mode).validate()
+        with self.assertRaisesRegex(ValueError, "voxel、radius 或 none"):
+            MapExportConfig(filter_mode="statistical").validate()
+        with self.assertRaisesRegex(ValueError, "0.02–1.0"):
+            MapExportConfig(filter_voxel_size=0.01).validate()
+
+    def test_voxel_structure_filter_removes_only_unsupported_single_columns(self):
+        horizontal = np.array([
+            [0.05, 0.05, 0.55],
+            [0.15, 0.05, 0.55],
+        ], dtype=np.float32)
+        vertical = np.array([
+            [2.05, 2.05, 0.55],
+            [2.05, 2.05, 0.65],
+        ], dtype=np.float32)
+        # Repeating points inside one voxel must not manufacture structural
+        # support: classification is based on unique occupied voxels.
+        isolated = np.repeat(
+            np.array([[5.05, 5.05, 0.55]], dtype=np.float32), 4, axis=0
+        )
+        points = np.vstack((horizontal, vertical, isolated))
+        original = points.copy()
+
+        filtered, metadata = _voxel_structure_filter(points, 0.10)
+
+        np.testing.assert_array_equal(filtered, np.vstack((horizontal, vertical)))
+        np.testing.assert_array_equal(points, original)
+        self.assertEqual(metadata["filter_voxels"], 5)
+        self.assertEqual(metadata["filter_columns"], 4)
+        self.assertEqual(metadata["filter_kept_columns"], 3)
+        self.assertEqual(metadata["filter_removed_columns"], 1)
+        self.assertEqual(metadata["filter_removed_points"], 4)
+
+    def test_voxel_structure_filter_metadata_reaches_occupancy_projection(self):
+        points = np.array([
+            [0.05, 0.05, 0.55], [0.15, 0.05, 0.55],
+            [2.05, 2.05, 0.55], [2.05, 2.05, 0.65],
+            [5.05, 5.05, 0.55],
+        ], dtype=np.float32)
+
+        _, metadata = slice_points_to_occupancy(
+            points,
+            MapExportConfig(
+                z_min=0.1,
+                z_max=1.0,
+                filter_mode="voxel",
+                filter_voxel_size=0.1,
+                padding=0.0,
+            ),
+        )
+
+        self.assertEqual(metadata["filter_mode"], "voxel")
+        self.assertEqual(metadata["slice_points"], 5)
+        self.assertEqual(metadata["filtered_points"], 4)
+        self.assertEqual(metadata["filter_removed_points"], 1)
+        self.assertEqual(metadata["filter_removed_columns"], 1)
+
     def test_radius_filter_never_occupies_all_cpu_workers(self):
         calls = []
 
@@ -324,7 +385,13 @@ class MappingCoreTests(unittest.TestCase):
     def test_slice_preview_matches_the_export_and_writes_nothing(self):
         xs, ys = np.meshgrid(np.linspace(-1, 1, 30), np.linspace(-0.8, 0.8, 24))
         points = np.column_stack((xs.ravel(), ys.ravel(), np.full(xs.size, 0.6))).astype(np.float32)
-        config = MapExportConfig(resolution=0.1, radius=0.0, min_neighbors=0)
+        config = MapExportConfig(
+            resolution=0.1,
+            radius=0.0,
+            min_neighbors=0,
+            filter_mode="voxel",
+            filter_voxel_size=0.1,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_binary_pcd(root / "pcd" / "venue.pcd", points)
@@ -346,6 +413,7 @@ class MappingCoreTests(unittest.TestCase):
             self.assertEqual((width, height), (exported_width, exported_height))
             np.testing.assert_array_equal(pixels, exported_pixels)
             self.assertEqual(metadata["width"], exported["width"])
+            self.assertEqual(metadata["filter_mode"], "voxel")
             self.assertEqual(metadata["preview_stride"], 1)
             self.assertEqual(metadata["occupied_cells"], metadata["preview_occupied_cells"])
             self.assertGreater(metadata["occupied_cells"], 0)

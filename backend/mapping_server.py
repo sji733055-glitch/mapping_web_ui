@@ -117,6 +117,7 @@ WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 # Slice parameters the offline 2-D conversion accepts from the operator console.
 EXPORT_OVERRIDE_KEYS = (
     "resolution", "z_min", "z_max", "radius", "min_neighbors", "padding", "height_mode",
+    "filter_mode", "filter_voxel_size",
 )
 EXPORT_OVERRIDE_LABELS = {
     "resolution": "分辨率",
@@ -126,6 +127,8 @@ EXPORT_OVERRIDE_LABELS = {
     "min_neighbors": "最小邻点",
     "padding": "边缘留白",
     "height_mode": "高度基准",
+    "filter_mode": "离群点滤波模式",
+    "filter_voxel_size": "结构体素尺寸",
 }
 
 
@@ -153,6 +156,12 @@ def export_config_from_overrides(
             mode = str(raw).strip().lower()
             if mode not in {"ground", "absolute"}:
                 raise ValueError("高度基准必须是 ground 或 absolute")
+            values[key] = mode
+            continue
+        if key == "filter_mode":
+            mode = str(raw).strip().lower()
+            if mode not in {"voxel", "radius", "none"}:
+                raise ValueError("离群点滤波模式必须是 voxel、radius 或 none")
             values[key] = mode
             continue
         try:
@@ -208,6 +217,8 @@ def occupancy_preview_headers(metadata: dict[str, Any]) -> dict[str, str]:
         "X-Map-Z-Min": f"{float(metadata['z_min']):.8g}",
         "X-Map-Z-Max": f"{float(metadata['z_max']):.8g}",
         "X-Map-Height-Mode": str(metadata["height_mode"]),
+        "X-Map-Filter-Mode": str(metadata["filter_mode"]),
+        "X-Map-Filter-Removed": str(metadata["filter_removed_points"]),
         "X-Map-Slice-Points": str(metadata["slice_points"]),
         "X-Map-Filtered-Points": str(metadata["filtered_points"]),
         "X-Map-Occupied": str(metadata["occupied_cells"]),
@@ -221,6 +232,13 @@ def occupancy_preview_headers(metadata: dict[str, Any]) -> dict[str, str]:
             "X-Map-Ground-C": f"{float(metadata['ground_c']):.10g}",
             "X-Map-Ground-Tilt": f"{float(metadata['ground_tilt_deg']):.8g}",
             "X-Map-Ground-Cells": str(metadata["ground_inlier_cells"]),
+        })
+    if metadata.get("filter_mode") == "voxel":
+        headers.update({
+            "X-Map-Filter-Voxel-Size": f"{float(metadata['filter_voxel_size']):.8g}",
+            "X-Map-Filter-Voxels": str(metadata["filter_voxels"]),
+            "X-Map-Filter-Columns": str(metadata["filter_columns"]),
+            "X-Map-Filter-Removed-Columns": str(metadata["filter_removed_columns"]),
         })
     return headers
 
@@ -520,6 +538,8 @@ class MappingSupervisor(Node):
             min_neighbors=settings.min_neighbors,
             padding=settings.map_padding,
             height_mode=settings.height_mode,
+            filter_mode=settings.map_filter_mode,
+            filter_voxel_size=settings.map_filter_voxel_size,
         )
         self.export_config.validate()
         self.polar_dynamic_config = polar_disappearance_config(settings)
@@ -890,6 +910,8 @@ class MappingSupervisor(Node):
                     "min_neighbors": self.export_config.min_neighbors,
                     "padding": self.export_config.padding,
                     "height_mode": self.export_config.height_mode,
+                    "filter_mode": self.export_config.filter_mode,
+                    "filter_voxel_size": self.export_config.filter_voxel_size,
                 },
                 "dynamic_removal": {
                     "enabled": bool(self.settings.dynamic_removal),
@@ -2173,6 +2195,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--radius-filter", type=float, default=0.50)
     parser.add_argument("--min-neighbors", type=int, default=10)
+    parser.add_argument(
+        "--map-filter-mode", choices=("voxel", "radius", "none"), default="voxel",
+        help="二维投影离群点滤波：voxel=结构体素，radius=半径邻域，none=关闭",
+    )
+    parser.add_argument(
+        "--map-filter-voxel-size", type=float, default=0.10,
+        help="结构体素滤波尺寸（米）",
+    )
     parser.add_argument("--map-padding", type=float, default=0.25)
     parser.add_argument("--http-log", action="store_true")
     return parser

@@ -258,12 +258,20 @@
               <label>障碍下限 / m<input id="pcd-z-min" type="number" step="0.05" value="0.05" /></label>
               <label>障碍上限 / m<input id="pcd-z-max" type="number" step="0.05" value="1.50" /></label>
               <label>分辨率 / m<input id="pcd-resolution" type="number" step="0.01" value="0.05" /></label>
-              <label>滤波半径 / m<input id="pcd-radius" type="number" step="0.05" value="0.50" /></label>
-              <label>最小邻点<input id="pcd-min-neighbors" type="number" step="1" value="10" /></label>
+              <label>离群点滤波
+                <select id="pcd-filter-mode">
+                  <option value="voxel">结构体素（推荐）</option>
+                  <option value="radius">半径邻域（兼容）</option>
+                  <option value="none">不滤波</option>
+                </select>
+              </label>
+              <label>结构体素 / m<input id="pcd-filter-voxel-size" type="number" step="0.01" value="0.10" /></label>
+              <label>半径模式半径 / m<input id="pcd-radius" type="number" step="0.05" value="0.50" /></label>
+              <label>半径模式最小邻点<input id="pcd-min-neighbors" type="number" step="1" value="10" /></label>
               <label>边缘留白 / m<input id="pcd-padding" type="number" step="0.05" value="0.25" /></label>
               <label class="convert-name-field">输出地图名<input id="pcd-output-name" type="text" maxlength="48" autocomplete="off" spellcheck="false" placeholder="留空＝沿用点云名称" /></label>
             </div>
-            <p class="field-help">「自动地面」会估计倾斜地面，上下限按相对地面高度计算，避免远处地面被投影成黑色障碍。</p>
+            <p class="field-help">「自动地面」会估计倾斜地面，避免远处地面变成黑色障碍。「结构体素」参考 ROGMap 的体素列与八邻域分类：删除没有垂直结构、也没有水平邻居支撑的孤立单体素。</p>
             <div class="convert-param-actions">
               <button class="text-button" id="pcd-defaults-button" type="button">恢复默认值</button>
               <button class="tool-button" id="pcd-map-preview-button" type="button" disabled>预览二维切片</button>
