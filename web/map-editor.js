@@ -8,6 +8,7 @@
     canvas: $("map-editor-canvas"), canvasWrap: $("map-canvas-wrap"), empty: $("editor-empty"),
     title: $("editor-title"), layerBadge: $("editor-layer-badge"), zoomLabel: $("editor-zoom-label"),
     zoomIn: $("editor-zoom-in"), zoomOut: $("editor-zoom-out"), fit: $("editor-fit"),
+    cloudToggle: $("editor-cloud-toggle"), cloudStatus: $("editor-cloud-status"),
     select: $("editor-map-select"), refresh: $("editor-refresh-maps"),
     loadOccupancy: $("editor-load-occupancy"), openTerrain: $("editor-open-terrain"), convert: $("editor-convert"), sourceNote: $("editor-source-note"),
     brushSize: $("editor-brush-size"), brushOutput: $("editor-brush-output"),
@@ -52,7 +53,10 @@
     dirty: false, busy: false, tool: "brush", label: 0, brushSize: 3, directionValue: 64,
     zoom: 1, panX: 0, panY: 0, hover: null, drag: null, preview: null,
     history: [], historyBytes: 0, renderPending: false, mapImageDirty: true,
-    mapCanvas: document.createElement("canvas"), mapsLoaded: false, frameDraft: null
+    mapCanvas: document.createElement("canvas"), mapsLoaded: false, frameDraft: null,
+    cloudCanvas: document.createElement("canvas"), cloudPoints: null, cloudMapName: "",
+    cloudVisible: false, cloudLoading: false, cloudShown: 0, cloudTotal: 0,
+    cloudInBounds: 0, cloudSliceLabel: "", cloudRequestSerial: 0
   };
   const ctx = dom.canvas.getContext("2d", { alpha: false });
   const mapCtx = state.mapCanvas.getContext("2d", { alpha: false });
@@ -121,6 +125,128 @@
       const size = entry.width && entry.height ? `${entry.width}×${entry.height}` : "尺寸待读取";
       const resolution = entry.resolution ? ` · ${Number(entry.resolution).toFixed(3)} m/px` : "";
       dom.sourceNote.textContent = `${size}${resolution} · ${entry.has_terrain ? "terrain 已生成" : "尚未生成 terrain"}`;
+    }
+    updateCloudUi();
+  }
+
+  function updateCloudUi() {
+    const loadedEntry = state.maps.find((entry) => entry.name === state.mapName);
+    const available = Boolean(state.values && loadedEntry?.has_pcd);
+    dom.cloudToggle.disabled = state.busy || state.cloudLoading || !available;
+    dom.cloudToggle.classList.toggle("is-active", state.cloudVisible);
+    dom.cloudToggle.setAttribute("aria-pressed", String(state.cloudVisible));
+    dom.cloudToggle.textContent = state.cloudLoading ? "点云…" : state.cloudVisible ? "隐藏点云 P" : "点云 P";
+    dom.cloudStatus.hidden = !state.cloudVisible;
+    if (state.cloudVisible) {
+      const count = state.cloudShown.toLocaleString("zh-CN");
+      const total = state.cloudTotal.toLocaleString("zh-CN");
+      const outside = Math.max(0, state.cloudShown - state.cloudInBounds);
+      const bounds = outside ? ` · 图内 ${state.cloudInBounds.toLocaleString("zh-CN")}` : "";
+      dom.cloudStatus.textContent = `俯视点云 ${count}/${total}${bounds} · ${state.cloudSliceLabel} · P 隐藏`;
+    }
+  }
+
+  function clearCloudOverlay() {
+    state.cloudRequestSerial += 1;
+    state.cloudPoints = null; state.cloudMapName = ""; state.cloudVisible = false;
+    state.cloudShown = 0; state.cloudTotal = 0; state.cloudInBounds = 0; state.cloudSliceLabel = "";
+    state.cloudCanvas.width = 1; state.cloudCanvas.height = 1;
+    updateCloudUi(); scheduleRender();
+  }
+
+  function decodeCloudFrame(buffer) {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 8) throw new Error("点云数据头不完整");
+    const view = new DataView(buffer);
+    const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+    if (magic !== "MAP1") throw new Error("点云数据格式不兼容");
+    const count = view.getUint32(4, true);
+    if (buffer.byteLength !== 8 + count * 12) throw new Error("点云数据长度不匹配");
+    return { count, values: new Float32Array(buffer, 8, count * 3) };
+  }
+
+  function rebuildCloudOverlay() {
+    const points = state.cloudPoints;
+    if (!points || !state.values || state.cloudMapName !== state.mapName) return;
+    state.cloudCanvas.width = state.width; state.cloudCanvas.height = state.height;
+    const cloudContext = state.cloudCanvas.getContext("2d", { alpha: true });
+    if (!cloudContext) return;
+    const image = cloudContext.createImageData(state.width, state.height);
+    const cosine = Math.cos(state.originYaw), sine = Math.sin(state.originYaw);
+    let inBounds = 0;
+    for (let index = 0; index < points.length; index += 3) {
+      const worldX = points[index], worldY = points[index + 1];
+      if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) continue;
+      const dx = worldX - state.originX, dy = worldY - state.originY;
+      const localX = cosine * dx + sine * dy;
+      const localY = -sine * dx + cosine * dy;
+      const x = Math.floor(localX / state.resolution), y = Math.floor(localY / state.resolution);
+      if (x < 0 || y < 0 || x >= state.width || y >= state.height) continue;
+      const target = ((state.height - 1 - y) * state.width + x) * 4;
+      inBounds += 1;
+      image.data[target] = 18; image.data[target + 1] = 244; image.data[target + 2] = 218;
+      image.data[target + 3] = Math.min(255, image.data[target + 3] + 112);
+    }
+    cloudContext.putImageData(image, 0, 0);
+    state.cloudInBounds = inBounds;
+  }
+
+  async function cloudSliceQuery(mapName) {
+    const query = new URLSearchParams({ name: mapName });
+    let label = "完整 PCD 的 XY 投影";
+    try {
+      const response = await fetch(`/api/status?t=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return { query, label };
+      const payload = await response.json();
+      const config = payload?.map_export || {};
+      const zMin = Number(config.z_min), zMax = Number(config.z_max);
+      if (Number.isFinite(zMin) && Number.isFinite(zMax) && zMin < zMax) {
+        query.set("z_min", String(zMin)); query.set("z_max", String(zMax));
+        if (["ground", "absolute"].includes(config.height_mode)) query.set("height_mode", config.height_mode);
+        label = config.height_mode === "ground"
+          ? `相对地面 ${zMin}–${zMax} m 障碍切片`
+          : `全局 Z ${zMin}–${zMax} m 障碍切片`;
+      }
+    } catch (_) {
+      // The overlay can still fall back to the complete PCD if status polling fails.
+    }
+    return { query, label };
+  }
+
+  async function showCloudOverlay() {
+    const loadedEntry = state.maps.find((entry) => entry.name === state.mapName);
+    if (!state.values || !loadedEntry?.has_pcd || state.cloudLoading) return;
+    if (state.cloudPoints && state.cloudMapName === state.mapName) {
+      state.cloudVisible = true; updateCloudUi(); scheduleRender(); return;
+    }
+    const mapName = state.mapName;
+    const requestSerial = ++state.cloudRequestSerial;
+    state.cloudLoading = true; updateCloudUi();
+    try {
+      const { query, label } = await cloudSliceQuery(mapName);
+      const response = await fetch(`/api/pcd/preview?${query}`, { cache: "no-store" });
+      if (!response.ok) throw await responseError(response);
+      const decoded = decodeCloudFrame(await response.arrayBuffer());
+      if (requestSerial !== state.cloudRequestSerial || state.mapName !== mapName) return;
+      state.cloudPoints = decoded.values; state.cloudMapName = mapName;
+      state.cloudShown = Number(response.headers?.get?.("X-Preview-Points")) || decoded.count;
+      state.cloudTotal = Number(response.headers?.get?.("X-Preview-Total")) || state.cloudShown;
+      state.cloudSliceLabel = label; state.cloudVisible = true;
+      rebuildCloudOverlay(); updateCloudUi(); scheduleRender();
+    } catch (error) {
+      if (requestSerial === state.cloudRequestSerial) {
+        clearCloudOverlay();
+        toast(`点云叠加失败：${error.message}`, "error");
+      }
+    } finally {
+      state.cloudLoading = false; updateCloudUi();
+    }
+  }
+
+  function toggleCloudOverlay() {
+    if (state.cloudVisible) {
+      state.cloudVisible = false; updateCloudUi(); scheduleRender();
+    } else {
+      void showCloudOverlay();
     }
   }
 
@@ -199,6 +325,7 @@
   async function loadLayer(layer, { skipDirtyCheck = false } = {}) {
     const entry = selectedMap();
     if (!entry || (!skipDirtyCheck && hasUnsavedChanges())) return;
+    const mapChanged = state.mapName !== entry.name;
     const endpoint = layer === LAYER_OCCUPANCY ? "occupancy" : "terrain";
     state.busy = true; updateSourceControls(); dom.saveStatus.textContent = "正在读取地图…";
     try {
@@ -206,6 +333,7 @@
       const response = await fetch(`/api/editor/${endpoint}?${query}`, { cache: "no-store" });
       if (!response.ok) throw await responseError(response);
       const decoded = decodeEditorPayload(await response.arrayBuffer());
+      if (mapChanged) clearCloudOverlay();
       state.mapName = entry.name; state.layer = decoded.layer; state.width = decoded.width; state.height = decoded.height;
       state.resolution = decoded.resolution; state.originX = decoded.originX; state.originY = decoded.originY; state.originYaw = decoded.originYaw;
       state.values = decoded.values; state.direction = decoded.direction; state.dirty = false;
@@ -213,6 +341,7 @@
       state.frameDraft = null; dom.frameX.value = "0"; dom.frameY.value = "0"; dom.frameYaw.value = "0";
       state.label = decoded.layer === LAYER_OCCUPANCY ? 0 : 1;
       state.mapImageDirty = true;
+      if (!mapChanged && state.cloudPoints && state.cloudMapName === entry.name) rebuildCloudOverlay();
       buildPalette(); updateEditorUi(); fitMap();
       dom.saveStatus.textContent = decoded.layer === LAYER_OCCUPANCY ? "二维 PGM 已加载" : "terrain msgpack 已加载";
     } catch (error) {
@@ -401,6 +530,7 @@
     const terrainText = entry.has_terrain ? "、terrain 语义与方向" : "";
     if (!window.confirm(`将以当前坐标 (${originX.toFixed(3)}, ${originY.toFixed(3)}) 为新 map 原点，并把 +X 设为 ${(heading * 180 / Math.PI).toFixed(1)}°。\n\n完整 PCD、PGM/YAML${terrainText}会成组变换；二维栅格旋转会进行最近邻重采样，操作不能在网页中撤销。确认继续吗？`)) return;
     const previousLayer = state.layer;
+    const restoreCloudOverlay = state.cloudVisible;
     state.busy = true; updateSourceControls(); updateEditorUi();
     dom.saveStatus.textContent = "正在统一 PCD、二维图与 terrain 的 map 坐标系…";
     try {
@@ -411,10 +541,12 @@
       if (!response.ok) throw await responseError(response);
       const result = await response.json();
       toast(result.message, "success");
+      clearCloudOverlay();
       state.busy = false;
       await refreshMaps();
       dom.select.value = entry.name;
       await loadLayer(previousLayer, { skipDirtyCheck: true });
+      if (restoreCloudOverlay) await showCloudOverlay();
       dom.saveStatus.textContent = result.message;
     } catch (error) {
       dom.saveStatus.textContent = error.message;
@@ -474,6 +606,7 @@
     dom.zoomLabel.textContent = `${Math.round(state.zoom * 100)}%`;
     dom.canvas.classList.toggle("is-panning", state.tool === "pan");
     dom.canvas.classList.toggle("is-frame-picking", state.tool === "frame");
+    updateCloudUi();
     updateDirectionUi();
   }
 
@@ -559,6 +692,12 @@
     rebuildMapImage();
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(state.mapCanvas, state.panX, state.panY, state.width * state.zoom, state.height * state.zoom);
+    if (state.cloudVisible && state.cloudPoints && state.cloudMapName === state.mapName) {
+      ctx.save();
+      ctx.globalAlpha = 0.82;
+      ctx.drawImage(state.cloudCanvas, state.panX, state.panY, state.width * state.zoom, state.height * state.zoom);
+      ctx.restore();
+    }
     drawDirections(ctx);
     drawPreview(ctx);
     drawCoordinateFrame(ctx);
@@ -854,6 +993,7 @@
   dom.openTerrain.addEventListener("click", () => loadLayer(LAYER_TERRAIN));
   dom.convert.addEventListener("click", convertToTerrain);
   dom.frameApply.addEventListener("click", applyMapFrame);
+  dom.cloudToggle.addEventListener("click", toggleCloudOverlay);
   for (const input of [dom.frameX, dom.frameY, dom.frameYaw]) input.addEventListener("input", updateFrameDraftFromInputs);
   dom.save.addEventListener("click", () => saveCurrent());
   dom.undo.addEventListener("click", undo);
@@ -878,6 +1018,9 @@
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); undo(); return; }
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "p" && !dom.cloudToggle.disabled) {
+      event.preventDefault(); toggleCloudOverlay(); return;
+    }
     if (/^[0-6]$/.test(event.key)) selectLabel(Number(event.key));
   });
 

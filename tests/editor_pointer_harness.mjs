@@ -2,8 +2,9 @@
 //
 // The mapping console must stay testable without a browser or a build tool, so
 // this harness stubs the small DOM surface the editor uses and drives the real
-// module: it loads a map, activates the `map` frame picker, and replays the
-// three pointer gestures (place, move the origin handle, turn the +X handle).
+// module: it loads a map, checks the coordinate-aligned top-down PCD overlay,
+// activates the `map` frame picker, and replays the three pointer gestures
+// (place, move the origin handle, turn the +X handle).
 // Run it with: node tests/editor_pointer_harness.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -15,6 +16,7 @@ const EDITOR_JS = process.env.EDITOR_JS || path.join(HERE, "..", "web", "map-edi
 const SOURCE = fs.readFileSync(EDITOR_JS, "utf8");
 
 const noop = () => {};
+const writtenImages = [];
 
 function makeClassList() {
   const set = new Set();
@@ -37,7 +39,7 @@ function context2d() {
     canvas: { width: 800, height: 600 },
     createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
     getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
-    putImageData: noop,
+    putImageData: (image) => writtenImages.push(image),
     measureText: () => ({ width: 10 }),
     arc: (x, y, radius) => arcs.push({ x, y, radius }),
   };
@@ -51,6 +53,7 @@ const listeners = new Map();
 const toolButtons = [];
 
 function makeElement(tag, id = "") {
+  const attributes = new Map();
   return {
     tagName: tag.toUpperCase(), id, dataset: {}, children: [], hidden: false,
     disabled: false, checked: false, value: "", textContent: "", className: "",
@@ -72,7 +75,9 @@ function makeElement(tag, id = "") {
     setPointerCapture: noop, releasePointerCapture: noop, hasPointerCapture: () => false,
     getContext: () => context2d(),
     querySelectorAll: () => [],
-    setAttribute: noop, getAttribute: () => null, removeAttribute: noop, focus: noop,
+    setAttribute: (name, value) => attributes.set(name, String(value)),
+    getAttribute: (name) => attributes.get(name) ?? null,
+    removeAttribute: (name) => attributes.delete(name), focus: noop,
   };
 }
 
@@ -122,6 +127,17 @@ function editorPayload(originX, originY) {
   return buffer;
 }
 
+function cloudPayload() {
+  const buffer = new ArrayBuffer(8 + 12);
+  const view = new DataView(buffer);
+  view.setUint8(0, 0x4d); view.setUint8(1, 0x41); view.setUint8(2, 0x50); view.setUint8(3, 0x31);
+  view.setUint32(4, 1, true);
+  view.setFloat32(8, -6.8096313 + 10.5 * MAP.resolution, true);
+  view.setFloat32(12, -5.0894675 + 20.5 * MAP.resolution, true);
+  view.setFloat32(16, 0.5, true);
+  return buffer;
+}
+
 const requests = [];
 async function fetchStub(url, options = {}) {
   requests.push(`${options.method || "GET"} ${url}`);
@@ -129,6 +145,15 @@ async function fetchStub(url, options = {}) {
   if (target.startsWith("/api/maps")) return { ok: true, json: async () => ({ maps: [MAP] }) };
   if (target.startsWith("/api/editor/occupancy")) {
     return { ok: true, arrayBuffer: async () => editorPayload(-6.8096313, -5.0894675) };
+  }
+  if (target.startsWith("/api/status")) {
+    return { ok: true, json: async () => ({ map_export: { height_mode: "ground", z_min: 0.05, z_max: 1.5 } }) };
+  }
+  if (target.startsWith("/api/pcd/preview")) {
+    return {
+      ok: true, arrayBuffer: async () => cloudPayload(),
+      headers: { get: (name) => name === "X-Preview-Points" || name === "X-Preview-Total" ? "1" : null },
+    };
   }
   return { ok: true, json: async () => ({ ok: true, message: "stub" }) };
 }
@@ -205,6 +230,24 @@ byId("editor-map-select").dispatchEvent({ type: "change" });
 byId("editor-load-occupancy").dispatchEvent({ type: "click" });
 await settle();
 check("帧工具在地图与 PCD 就绪后可用", pick.disabled === false, byId("editor-frame-note").textContent);
+
+// The overlay fetches the obstacle-height slice and rasterizes its XY point at
+// the exact PGM cell (10, 20), accounting for the display's flipped Y axis.
+const cloudToggle = byId("editor-cloud-toggle");
+cloudToggle.dispatchEvent({ type: "click" });
+await settle();
+paint();
+const cloudRequest = requests.find((entry) => entry.includes("/api/pcd/preview")) || "";
+check("点云按钮加载同名 PCD 的俯视投影", cloudToggle.getAttribute("aria-pressed") === "true", byId("editor-cloud-status").textContent);
+check("点云叠加使用障碍高度切片", cloudRequest.includes("height_mode=ground") && cloudRequest.includes("z_min=0.05") && cloudRequest.includes("z_max=1.5"), cloudRequest);
+const alignedPixel = ((MAP.height - 1 - 20) * MAP.width + 10) * 4;
+const cloudImage = writtenImages.find((image) => image.width === MAP.width && image.height === MAP.height
+  && image.data[alignedPixel] === 18 && image.data[alignedPixel + 1] === 244 && image.data[alignedPixel + 2] === 218);
+check("点云 XY 按 YAML 原点与分辨率对齐到栅格", Boolean(cloudImage), `cell=(10, 20)`);
+for (const handler of listeners.get("document:keydown") || []) handler({
+  key: "p", target: cloudToggle, ctrlKey: false, metaKey: false, altKey: false, preventDefault: noop,
+});
+check("P 快捷键可隐藏点云层", cloudToggle.getAttribute("aria-pressed") === "false");
 
 pick.dispatchEvent({ type: "click" });
 check("按下按钮后进入取帧模式", canvas.classList.contains("is-frame-picking"));

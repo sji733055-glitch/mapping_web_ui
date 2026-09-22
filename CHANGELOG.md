@@ -19,6 +19,12 @@
 - 回归覆盖：新增 `tests/point_cloud_viewer_harness.mjs`，用真实查看器和 Canvas/WebGL 桩验证拖动中不上传新点云、两帧到达合并为最新帧、120,000 点在拖动时等间隔绘制 60,000 点、相机在下一动画帧更新、RViz 旋转方向、中键平移、右键向上拖动放大、正确俯视与滚轮归一化。`AGENTS.md` 与 `README.md` 已将它纳入无浏览器验证流程。
 - 验证：`python3 -m compileall -q backend tests`、`python3 -m unittest discover -s tests -v`（48 项）、三个前端 `node --check`、`node tests/point_cloud_viewer_harness.mjs`、`node tests/editor_pointer_harness.mjs`、`node tests/app_status_harness.mjs`、`bash -n run.sh` 与 `git diff --check` 全通过。未连接真实雷达，未启动 ROS 建图链，未使用真实浏览器/GPU 对超大 PCD 的实际帧率与手感做主观验收。
 
+## 2026-09-22 — 二维地图编辑器叠加坐标对齐的俯视点云
+
+- 操作与显示：`web/index.html` / `web/styles.css` / `web/map-editor.js` 在地图画布标题栏新增“点云 P”开关，鼠标点击或非输入框聚焦时按 `P` 可显示/隐藏。叠加层复用同名 PCD 的 `GET /api/pcd/preview` `MAP1` 载荷，按 `/api/status` 当前的 `height_mode` / `z_min` / `z_max` 先取障碍高度切片，再仅将 XY 投影为半透明青色点层；不增加三维视角，不写入或改动 PCD。
+- 坐标与数据安全：每个点使用 YAML 原点、分辨率和 origin yaw 转到 PGM 栅格，并在离屏画布中预先栅格化，因此缩放、平移和窗口变尺寸时不会与地图错位，也避免每帧重画数十万个点。切换地图会丢弃旧缓存；重新定义 map 坐标系后会重新读取已成组变换的 PCD；并发请求带序号守卫，迟到的旧地图响应不会覆盖新图。`README.md` 补充了用青色点层复核黑色障碍格的操作方法。
+- 测试：`tests/editor_pointer_harness.mjs` 新增 `MAP1` 点云桩，验证后端默认高度窗口传入预览请求、一个已知世界 XY 点精确落在预期的 `(10, 20)` 栅格，以及 `P` 快捷键关闭叠加层。验证通过：`python3 -m compileall -q backend tests`；`python3 -m unittest discover -s tests -v`（48 项）；三个 `node --check`；`node tests/editor_pointer_harness.mjs`；`node tests/app_status_harness.mjs`；`bash -n run.sh`；`git diff --check`。未连接真实雷达，未启动 ROS 建图链，也未用真实浏览器对大型 PCD 进行视觉/帧率验收。
+
 ## 2026-09-22 — 本地 small_point_lio 覆盖工作区纳入版本管理
 
 - 背景：`e4f1be4` 已把受管 LIO 改为启动项目内 `ros2_ws/install/small_point_lio` 的可执行文件，`run.sh` 也会 source `ros2_ws/install/setup.bash`，但 `ros2_ws/src/small_point_lio` 与 `ros2_ws/README.md` 当时漏了 `git add`，一直处于未跟踪状态；只克隆本仓库时本地覆盖工作区缺源码，无法按 `ros2_ws/README.md` 重建。

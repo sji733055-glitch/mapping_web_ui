@@ -303,6 +303,7 @@
             </div>
             <div class="editor-heading-tools">
               <span class="layer-badge" id="editor-layer-badge">未加载</span>
+              <button class="tool-button cloud-overlay-button" id="editor-cloud-toggle" type="button" aria-label="叠加同名 PCD 点云" aria-pressed="false" aria-keyshortcuts="P" title="叠加同名 PCD 的障碍高度切片（快捷键 P）" disabled>点云 P</button>
               <button class="tool-button" id="editor-zoom-out" type="button" aria-label="缩小地图">−</button>
               <button class="tool-button" id="editor-zoom-in" type="button" aria-label="放大地图">＋</button>
               <button class="tool-button" id="editor-fit" type="button">适应视图</button>
@@ -314,6 +315,7 @@
               <strong>选择一张地图开始编辑</strong>
               <span>可先修整 PGM 占据图，再生成并标注 terrain msgpack</span>
             </div>
+            <div class="editor-cloud-status" id="editor-cloud-status" hidden></div>
           </div>
           <div class="editor-footer">
             <span id="editor-coordinate">栅格 —</span>

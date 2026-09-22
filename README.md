@@ -153,10 +153,11 @@ colcon build --symlink-install --packages-select small_point_lio \
 完成一次建图并保存后，点击页头的“地图编辑”：
 
 1. 从 `data/map` 选择地图，点击“编辑二维 PGM”。二维层提供障碍物、可通行、未知区域三类像素，可用笔刷、矩形和画线修图；保存只原子替换该地图 YAML 引用的 PGM，不改变 YAML 的分辨率或原点。
-2. 在“map 坐标系”中点击“在图上拖出原点与 +X”后有三种手势：在空白处按下＝该点成为新 `(0,0)` 并拖出 `map +X`；拖动原点圆圈＝平移坐标系且保持朝向；拖动 +X 箭头＝只转向且保持原点。也可以在输入框中直接填写原点在当前地图中的 X/Y 和 +X 朝向角。点击“统一 PCD 与二维图坐标系”并确认后，后端会对同名完整 PCD 应用相同二维刚体变换，把 PGM 和已有 terrain 最近邻重采样到 yaw=0 的轴对齐栅格，并同步旋转 terrain 方向。建议在精修 PGM/terrain 前先定义坐标系，避免重复重采样。
-3. 点击“生成 terrain MSG”。后端按 YAML 的 `occupied_thresh` 和 `negate` 把二维图转换为 `<地图名称>_terrain.msgpack`，随后自动打开 terrain 图层。
-4. 在 terrain 图层选择 `0–6` 标签；斜坡、台阶和飞坡可设置方向。画线工具会使用线段左侧法向作为通过方向，笔刷和矩形使用方向滑块的值。
-5. 点击“保存当前图层”。输出采用 `mas_nav_2027_native` 当前 `map_server` 可直接读取的 `width`、`height`、`resolution`、`terrain`、`direction` MessagePack 字段；两个 uint8 通道按 MessagePack ARRAY 写入，与导航端的 `via.array` 加载方式一致。网页仍可读取旧 BIN 格式，保存一次即自动迁移为 ARRAY。
+2. 点画布右上角“点云 P”，或在非输入框聚焦时按 `P`，可显示/隐藏同名 PCD 的青色俯视点层。网页先按后端当前的障碍高度窗口取点，再只使用 XY 投影；点云与 PGM 共用 YAML 原点、分辨率和 yaw，缩放或平移时保持重合。青色点仍存在的黑格可视为有点云支撑；只有黑格而没有青色点的区域可重点复核，再用“可通行”笔刷清掉不存在的障碍。此叠加层只读 PCD，不会修改点云或地图。
+3. 在“map 坐标系”中点击“在图上拖出原点与 +X”后有三种手势：在空白处按下＝该点成为新 `(0,0)` 并拖出 `map +X`；拖动原点圆圈＝平移坐标系且保持朝向；拖动 +X 箭头＝只转向且保持原点。也可以在输入框中直接填写原点在当前地图中的 X/Y 和 +X 朝向角。点击“统一 PCD 与二维图坐标系”并确认后，后端会对同名完整 PCD 应用相同二维刚体变换，把 PGM 和已有 terrain 最近邻重采样到 yaw=0 的轴对齐栅格，并同步旋转 terrain 方向。建议在精修 PGM/terrain 前先定义坐标系，避免重复重采样。
+4. 点击“生成 terrain MSG”。后端按 YAML 的 `occupied_thresh` 和 `negate` 把二维图转换为 `<地图名称>_terrain.msgpack`，随后自动打开 terrain 图层。
+5. 在 terrain 图层选择 `0–6` 标签；斜坡、台阶和飞坡可设置方向。画线工具会使用线段左侧法向作为通过方向，笔刷和矩形使用方向滑块的值。
+6. 点击“保存当前图层”。输出采用 `mas_nav_2027_native` 当前 `map_server` 可直接读取的 `width`、`height`、`resolution`、`terrain`、`direction` MessagePack 字段；两个 uint8 通道按 MessagePack ARRAY 写入，与导航端的 `via.array` 加载方式一致。网页仍可读取旧 BIN 格式，保存一次即自动迁移为 ARRAY。
 
 坐标系设置需要 `data/pcd/<名称>.pcd` 与 PGM/YAML 同名存在；缺少 PCD 时网页会禁用应用按钮，避免只改二维图。操作会生成 `<名称>_frame.json`，其中 `source_to_map` 是把原始 LIO/odom 点坐标变换到固定 map 坐标的变换，也就是后续 TF 中 `map→odom` 所需的平面变换语义；`map_to_source` 是其逆变换。重复定义会在元数据中累计组合，但每次都需要重采样二维栅格，因此应尽量一次定准。
 
