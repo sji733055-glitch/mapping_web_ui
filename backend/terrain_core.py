@@ -1,9 +1,11 @@
 """ROS-independent occupancy and HW terrain-map editing primitives.
 
 The browser uses a compact, fixed-layout payload while files on disk retain
-their native PGM/YAML and MessagePack representations.  The MessagePack
-encoder writes the two uint8 channels as BIN values, matching the HW Python
-editor and the ``std::vector<uint8_t>`` adapter used by its C++ map server.
+their native PGM/YAML and MessagePack representations.  New MessagePack files
+write the two uint8 channels as ARRAY values because the current
+``mas_nav_2027_native`` map server iterates ``via.array`` directly.  The reader
+continues to accept legacy BIN channels so existing maps remain editable and
+are migrated to ARRAY the next time they are saved.
 """
 
 from __future__ import annotations
@@ -363,16 +365,31 @@ def _pack_string(value: str) -> bytes:
     return b"\xDA" + struct.pack(">H", len(encoded)) + encoded
 
 
-def _pack_uint8_blob(values: np.ndarray) -> bytes:
+def _pack_uint8_array(values: np.ndarray) -> bytes:
+    """Encode a uint8 vector as a MessagePack ARRAY for the HW map server.
+
+    Values through 127 use positive fixint; larger values use the uint8 marker.
+    Building the element stream with NumPy avoids a Python loop for multi-
+    million-cell maps while preserving the exact ARRAY layout consumed by
+    ``mas_nav_2027_native``'s ``load_terrain_msgpack()``.
+    """
     raw = np.ascontiguousarray(values, dtype=np.uint8).reshape(-1)
     size = len(raw)
-    if size <= 0xFF:
-        prefix = b"\xC4" + struct.pack(">B", size)
+    if size < 16:
+        prefix = bytes((0x90 | size,))
     elif size <= 0xFFFF:
-        prefix = b"\xC5" + struct.pack(">H", size)
+        prefix = b"\xDC" + struct.pack(">H", size)
     else:
-        prefix = b"\xC6" + struct.pack(">I", size)
-    return prefix + raw.tobytes(order="C")
+        prefix = b"\xDD" + struct.pack(">I", size)
+
+    high = raw > 0x7F
+    if not bool(np.any(high)):
+        return prefix + raw.tobytes(order="C")
+    positions = np.arange(size, dtype=np.int64) + np.cumsum(high, dtype=np.int64)
+    encoded = np.empty(size + int(np.count_nonzero(high)), dtype=np.uint8)
+    encoded[positions] = raw
+    encoded[positions[high] - 1] = 0xCC
+    return prefix + encoded.tobytes(order="C")
 
 
 def pack_terrain_msgpack(editor_map: EditorMap) -> bytes:
@@ -383,8 +400,8 @@ def pack_terrain_msgpack(editor_map: EditorMap) -> bytes:
         ("width", b"\xD2" + struct.pack(">i", editor_map.metadata.width)),
         ("height", b"\xD2" + struct.pack(">i", editor_map.metadata.height)),
         ("resolution", b"\xCB" + struct.pack(">d", editor_map.metadata.resolution)),
-        ("terrain", _pack_uint8_blob(editor_map.values)),
-        ("direction", _pack_uint8_blob(editor_map.direction)),
+        ("terrain", _pack_uint8_array(editor_map.values)),
+        ("direction", _pack_uint8_array(editor_map.direction)),
     )
     return b"\x85" + b"".join(_pack_string(key) + value for key, value in items)
 

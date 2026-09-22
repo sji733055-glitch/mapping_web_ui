@@ -1,5 +1,11 @@
 # Change history
 
+## 2026-09-22 — terrain 产物对齐导航端 MessagePack ARRAY
+
+- 根因与修正：`backend/terrain_core.py` 原先把 `terrain` / `direction` 编码为 MessagePack BIN，但当前 `/home/mas/mas_nav_2027_native` 的 `map_server::load_terrain_msgpack()` 直接通过 `via.array` 逐项读取，两者不再兼容。新写入的 terrain 现在使用 fixarray/array16/array32，0–127 使用 positive fixint，128–255 使用 uint8，可被导航端当前加载器原样读取。读取端仍保留旧 BIN 兼容，历史地图可继续打开并在下次保存时无损迁移。
+- 性能与测试：元素流由 NumPy 向量化生成，避免百万网格的 Python 逐项循环。`tests/test_terrain_core.py` 覆盖 fixarray、array16、大于 127 的 uint8 元素以及历史 BIN 读取；`README.md` 明确记录与导航端 `via.array` 的格式合同。
+- 验证（全通过）：`python3 -m compileall -q backend tests`、`python3 -m unittest discover -s tests -v`（52 项）、三个 `node --check`、`node tests/point_cloud_viewer_harness.mjs`、`node tests/editor_pointer_harness.mjs`、`node tests/app_status_harness.mjs`、`bash -n run.sh` 和 `git diff --check`。另将现有 `lab_map_20260921_211523_terrain.msgpack` 在 `/tmp` 重编码后，用与导航仓库当前源码相同的 msgpack-cxx `via.array.ptr[j].as<uint8_t>()` 探针成功读取 `772×308`、`0.05 m/px` 及两个各 237,776 项的通道。已将该现有 terrain 原子迁移为 array32，迁移前后 metadata 及两通道 SHA-256 完全一致；旧 BIN 原文备份于 `/tmp/lab_map_20260921_211523_terrain.legacy-bin.msgpack`。在隔离 ROS domain 中按正式 launch 的系统库优先级启动已安装的真实 `map_server_node`，节点成功加载 `772×308 @ 0.05 m/px` 的迁移后 terrain；`/cost_map` 实测为 `772×308`、分辨率 `0.05`、原点 `(-5.2370148, -7.8741794)`，与同名 YAML 完全一致。同样以隔离 domain 启动真实 `odom_localizer`，成功加载同名 PCD 的 1,435,901 点并完成先验点云预处理，日志明确确认该点云是 mapping-session odom/map 且不再应用雷达外参；无 `/cloud_registered` 时只按预期等待配准。两个节点均已精确停止并清理临时 ROS 日志。未连接真实雷达，未启动完整导航链/实车，未进行真实浏览器视觉检查；本轮未改动后端传输，因此未重复 HTTP `/api/status` / `/api/cloud` 冒烟。
+
 ## 2026-09-22 — 本地 small_point_lio 覆盖工作区纳入版本管理
 
 - 背景：`e4f1be4` 已把受管 LIO 改为启动项目内 `ros2_ws/install/small_point_lio` 的可执行文件，`run.sh` 也会 source `ros2_ws/install/setup.bash`，但 `ros2_ws/src/small_point_lio` 与 `ros2_ws/README.md` 当时漏了 `git add`，一直处于未跟踪状态；只克隆本仓库时本地覆盖工作区缺源码，无法按 `ros2_ws/README.md` 重建。
