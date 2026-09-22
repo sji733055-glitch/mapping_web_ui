@@ -300,6 +300,66 @@ class MappingCoreTests(unittest.TestCase):
             delta=0.1,
         )
 
+    def test_ground_relative_slice_follows_smooth_local_floor_bow(self):
+        xs, ys = np.meshgrid(
+            np.arange(-4.0, 4.01, 0.1, dtype=np.float32),
+            np.arange(-2.0, 2.01, 0.1, dtype=np.float32),
+        )
+        floor_z = 0.02 * xs + 0.16 * np.sin(np.pi * xs / 4.0) + 0.25
+        floor = np.column_stack((xs.ravel(), ys.ravel(), floor_z.ravel())).astype(np.float32)
+        wall_y, wall_height = np.meshgrid(
+            np.arange(-1.5, 1.51, 0.1, dtype=np.float32),
+            np.arange(0.1, 1.41, 0.1, dtype=np.float32),
+        )
+        wall_x = np.full(wall_y.size, 3.0, dtype=np.float32)
+        wall_ground = (
+            0.02 * wall_x
+            + 0.16 * np.sin(np.pi * wall_x / 4.0)
+            + 0.25
+        )
+        wall = np.column_stack((wall_x, wall_y.ravel(), wall_ground + wall_height.ravel()))
+        points = np.vstack((floor, wall)).astype(np.float32)
+
+        sliced, metadata = slice_points_by_config(
+            points,
+            MapExportConfig(z_min=0.05, z_max=1.5, height_mode="ground"),
+        )
+
+        floor_leaks = len(sliced) - len(wall)
+        self.assertGreaterEqual(floor_leaks, 0)
+        self.assertLessEqual(floor_leaks, max(4, len(floor) // 500))
+        np.testing.assert_allclose(sliced[-len(wall):], wall, atol=1e-5)
+        self.assertGreater(metadata["ground_local_anchor_cells"], 100)
+        self.assertGreater(metadata["ground_local_offset_max"], 0.10)
+        self.assertLess(metadata["ground_local_offset_min"], -0.10)
+
+    def test_local_ground_surface_does_not_absorb_ten_centimetre_platform(self):
+        xs, ys = np.meshgrid(
+            np.arange(-2.0, 2.01, 0.1, dtype=np.float32),
+            np.arange(-2.0, 2.01, 0.1, dtype=np.float32),
+        )
+        ground_z = 0.03 * xs - 0.01 * ys + 0.2
+        platform_mask = (
+            (xs >= 0.4) & (xs <= 1.4) & (ys >= -0.8) & (ys <= 0.8)
+        )
+        floor = np.column_stack((
+            xs[~platform_mask], ys[~platform_mask], ground_z[~platform_mask]
+        )).astype(np.float32)
+        platform = np.column_stack((
+            xs[platform_mask],
+            ys[platform_mask],
+            ground_z[platform_mask] + 0.10,
+        )).astype(np.float32)
+        points = np.vstack((floor, platform))
+
+        sliced, _ = slice_points_by_config(
+            points,
+            MapExportConfig(z_min=0.05, z_max=1.5, height_mode="ground"),
+        )
+
+        self.assertEqual(len(sliced), len(platform))
+        np.testing.assert_allclose(sliced, platform, atol=1e-5)
+
     def test_export_config_rejects_unknown_height_mode(self):
         with self.assertRaisesRegex(ValueError, "ground 或 absolute"):
             MapExportConfig(height_mode="local").validate()

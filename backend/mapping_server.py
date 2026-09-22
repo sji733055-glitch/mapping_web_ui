@@ -232,6 +232,10 @@ def occupancy_preview_headers(metadata: dict[str, Any]) -> dict[str, str]:
             "X-Map-Ground-C": f"{float(metadata['ground_c']):.10g}",
             "X-Map-Ground-Tilt": f"{float(metadata['ground_tilt_deg']):.8g}",
             "X-Map-Ground-Cells": str(metadata["ground_inlier_cells"]),
+            "X-Map-Ground-Local-Cells": str(metadata["ground_local_cells"]),
+            "X-Map-Ground-Local-Anchors": str(metadata["ground_local_anchor_cells"]),
+            "X-Map-Ground-Local-Min": f"{float(metadata['ground_local_offset_min']):.8g}",
+            "X-Map-Ground-Local-Max": f"{float(metadata['ground_local_offset_max']):.8g}",
         })
     if metadata.get("filter_mode") == "voxel":
         headers.update({

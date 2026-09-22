@@ -6,6 +6,7 @@ without a running ROS graph.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import json
@@ -1539,6 +1540,183 @@ def estimate_ground_plane(points: np.ndarray) -> tuple[np.ndarray, dict[str, flo
     }
 
 
+def _local_ground_offsets(
+    points: np.ndarray,
+    plane: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    """Estimate a smooth local correction to a fitted ground plane.
+
+    A single plane corrects LIO roll/pitch error, but real floors and long LIO
+    trajectories are not perfectly planar.  Their remaining few centimetres
+    of bow can still cross the default 5 cm obstacle threshold and turn a
+    traversable patch black.  This function grows a ground surface through
+    neighboring 0.4 m cells whose low-height samples change gradually, then
+    interpolates those offsets into occupied cells up to 2 m away.
+
+    The initial seed band and the per-cell growth step are deliberately below
+    a typical 10 cm curb.  A raised platform therefore cannot become ground
+    merely because it is broad and dense.  Point work stays vectorized; only
+    the bounded set of occupied XY cells is visited in Python.  Like the plane
+    fit, surface sampling is capped at 500,000 strided points.
+    """
+    source = np.asarray(points)
+    if source.ndim != 2 or source.shape[1] < 3 or not len(source):
+        return np.zeros(len(source), dtype=np.float64), {
+            "ground_local_cells": 0,
+            "ground_local_anchor_cells": 0,
+            "ground_local_offset_min": 0.0,
+            "ground_local_offset_max": 0.0,
+        }
+
+    cell_size = 0.4
+    maximum_fit_points = 500_000
+    stride = max(1, int(math.ceil(len(source) / maximum_fit_points)))
+    sample = np.asarray(source[::stride][:maximum_fit_points, :3], dtype=np.float32)
+    xy_min = np.asarray(source[:, :2].min(axis=0), dtype=np.float64)
+    xy_max = np.asarray(source[:, :2].max(axis=0), dtype=np.float64)
+    span_cells = np.floor((xy_max - xy_min) / cell_size).astype(np.int64) + 1
+    cell_width, cell_height = int(span_cells[0]), int(span_cells[1])
+    if cell_width < 1 or cell_height < 1:
+        return np.zeros(len(source), dtype=np.float64), {
+            "ground_local_cells": 0,
+            "ground_local_anchor_cells": 0,
+            "ground_local_offset_min": 0.0,
+            "ground_local_offset_max": 0.0,
+        }
+    if cell_width > np.iinfo(np.int64).max // cell_height:
+        raise ValueError("点云坐标范围过大，无法估计局部地面")
+
+    sample_x = np.floor((sample[:, 0].astype(np.float64) - xy_min[0]) / cell_size).astype(np.int64)
+    sample_y = np.floor((sample[:, 1].astype(np.float64) - xy_min[1]) / cell_size).astype(np.int64)
+    sample_ids = sample_y * cell_width + sample_x
+    order = np.lexsort((sample[:, 2], sample_ids))
+    sorted_ids = sample_ids[order]
+    starts = np.r_[0, np.flatnonzero(sorted_ids[1:] != sorted_ids[:-1]) + 1]
+    counts = np.diff(np.r_[starts, len(sorted_ids)])
+    populated = counts >= 5
+    if int(np.count_nonzero(populated)) < 12:
+        return np.zeros(len(source), dtype=np.float64), {
+            "ground_local_cells": int(len(starts)),
+            "ground_local_anchor_cells": 0,
+            "ground_local_offset_min": 0.0,
+            "ground_local_offset_max": 0.0,
+        }
+
+    starts = starts[populated]
+    counts = counts[populated]
+    cell_ids = sorted_ids[starts]
+    cell_x = cell_ids % cell_width
+    cell_y = cell_ids // cell_width
+    centers_x = xy_min[0] + (cell_x.astype(np.float64) + 0.5) * cell_size
+    centers_y = xy_min[1] + (cell_y.astype(np.float64) + 0.5) * cell_size
+    quantile_indices = starts + np.floor((counts - 1) * 0.10).astype(np.int64)
+    low_z = sample[order[quantile_indices], 2].astype(np.float64)
+    plane_z = plane[0] * centers_x + plane[1] * centers_y + plane[2]
+
+    # Strict seeds avoid declaring a 10 cm curb to be floor.  Region growth
+    # can still follow a smooth local bow/ramp much farther from the plane.
+    ground = np.abs(low_z - plane_z) <= 0.06
+    if int(np.count_nonzero(ground)) < 12:
+        return np.zeros(len(source), dtype=np.float64), {
+            "ground_local_cells": int(len(cell_ids)),
+            "ground_local_anchor_cells": int(np.count_nonzero(ground)),
+            "ground_local_offset_min": 0.0,
+            "ground_local_offset_max": 0.0,
+        }
+    id_to_index = {int(cell_id): index for index, cell_id in enumerate(cell_ids)}
+    queue = deque(np.flatnonzero(ground).tolist())
+    neighbors = (
+        (-1, 0), (1, 0), (0, -1), (0, 1),
+        (-1, -1), (-1, 1), (1, -1), (1, 1),
+    )
+    while queue:
+        index = queue.popleft()
+        x, y = int(cell_x[index]), int(cell_y[index])
+        for dx, dy in neighbors:
+            nx, ny = x + dx, y + dy
+            if nx < 0 or nx >= cell_width or ny < 0 or ny >= cell_height:
+                continue
+            adjacent = id_to_index.get(ny * cell_width + nx)
+            if adjacent is None or ground[adjacent]:
+                continue
+            allowed_step = 0.055 * (math.sqrt(2.0) if dx and dy else 1.0)
+            if abs(low_z[adjacent] - low_z[index]) <= allowed_step:
+                ground[adjacent] = True
+                queue.append(adjacent)
+
+    ground_indices = np.flatnonzero(ground)
+    if len(ground_indices) < 12:
+        return np.zeros(len(source), dtype=np.float64), {
+            "ground_local_cells": int(len(cell_ids)),
+            "ground_local_anchor_cells": int(len(ground_indices)),
+            "ground_local_offset_min": 0.0,
+            "ground_local_offset_max": 0.0,
+        }
+
+    # The tenth percentile follows the lower envelope.  Move it at most 4 cm
+    # toward the center of the local floor-return band so sensor thickness does
+    # not leak above a 5 cm operator threshold.  The cap protects low curbs.
+    anchor_z = low_z.copy()
+    for index in ground_indices:
+        cell_heights = sample[order[starts[index]:starts[index] + counts[index]], 2]
+        lower_band = cell_heights[cell_heights <= low_z[index] + 0.10]
+        if len(lower_band):
+            lift = float(np.median(lower_band)) - low_z[index]
+            anchor_z[index] += min(0.04, max(0.0, lift))
+    anchor_offsets = anchor_z[ground] - plane_z[ground]
+    anchor_ids = cell_ids[ground]
+    anchor_lookup = {
+        int(cell_id): float(offset)
+        for cell_id, offset in zip(anchor_ids, anchor_offsets)
+    }
+
+    # Find every occupied cell once, then map its correction back to all points
+    # with a vectorized inverse index.  This avoids per-point Python work.
+    point_x = np.floor((source[:, 0].astype(np.float64) - xy_min[0]) / cell_size).astype(np.int64)
+    point_y = np.floor((source[:, 1].astype(np.float64) - xy_min[1]) / cell_size).astype(np.int64)
+    point_ids = point_y * cell_width + point_x
+    occupied_ids, inverse = np.unique(point_ids, return_inverse=True)
+    occupied_offsets = np.zeros(len(occupied_ids), dtype=np.float64)
+
+    radius_cells = int(math.ceil(2.0 / cell_size))
+    search_offsets = sorted(
+        (
+            (dx * dx + dy * dy, dx, dy)
+            for dy in range(-radius_cells, radius_cells + 1)
+            for dx in range(-radius_cells, radius_cells + 1)
+            if dx * dx + dy * dy <= radius_cells * radius_cells
+        ),
+        key=lambda item: (item[0], item[2], item[1]),
+    )
+    for occupied_index, cell_id in enumerate(occupied_ids):
+        x, y = int(cell_id % cell_width), int(cell_id // cell_width)
+        weighted_sum = 0.0
+        total_weight = 0.0
+        found = 0
+        for distance_squared, dx, dy in search_offsets:
+            nx, ny = x + dx, y + dy
+            if nx < 0 or nx >= cell_width or ny < 0 or ny >= cell_height:
+                continue
+            offset = anchor_lookup.get(ny * cell_width + nx)
+            if offset is None:
+                continue
+            weight = 1.0 / max(float(distance_squared), 0.25)
+            weighted_sum += weight * offset
+            total_weight += weight
+            found += 1
+            if found >= 4:
+                break
+        if total_weight:
+            occupied_offsets[occupied_index] = weighted_sum / total_weight
+
+    return occupied_offsets[inverse], {
+        "ground_local_cells": int(len(cell_ids)),
+        "ground_local_anchor_cells": int(len(ground_indices)),
+        "ground_local_offset_min": float(anchor_offsets.min()),
+        "ground_local_offset_max": float(anchor_offsets.max()),
+    }
+
+
 def slice_points_by_config(
     points: np.ndarray,
     config: MapExportConfig,
@@ -1549,13 +1727,16 @@ def slice_points_by_config(
     metadata: dict[str, float | int | str] = {"height_mode": config.height_mode}
     if config.height_mode == "ground":
         plane, ground_metadata = estimate_ground_plane(xyz)
+        local_offsets, local_metadata = _local_ground_offsets(xyz, plane)
         relative_z = xyz[:, 2].astype(np.float64) - (
             xyz[:, 0].astype(np.float64) * plane[0]
             + xyz[:, 1].astype(np.float64) * plane[1]
             + plane[2]
+            + local_offsets
         )
         keep = (relative_z >= config.z_min) & (relative_z <= config.z_max)
         metadata.update(ground_metadata)
+        metadata.update(local_metadata)
     else:
         keep = (xyz[:, 2] >= config.z_min) & (xyz[:, 2] <= config.z_max)
     return np.ascontiguousarray(xyz[keep]), metadata

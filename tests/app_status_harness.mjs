@@ -119,6 +119,7 @@ const previewHeaders = () => new Map([
   ["X-Map-Resolution", "0.05"], ["X-Map-Origin-X", "-1"], ["X-Map-Origin-Y", "-2"],
   ["X-Map-Height-Mode", "ground"],
   ["X-Map-Ground-Tilt", "2.17"],
+  ["X-Map-Ground-Local-Anchors", "63"],
   ["X-Map-Filter-Mode", "voxel"], ["X-Map-Filter-Removed", "37"],
   ["X-Map-Slice-Points", "900"], ["X-Map-Occupied", "3"], ["X-Map-Preview-Stride", "1"],
 ]);
@@ -289,7 +290,7 @@ await settle();
 const previewBody = posted.at(-1)?.body || {};
 check("预览请求使用当前参数", previewBody.map_name === "venue_map" && previewBody.height_mode === "ground" && previewBody.filter_mode === "voxel" && previewBody.filter_voxel_size === 0.1 && previewBody.z_min === 0.05 && previewBody.resolution === 0.05, JSON.stringify(previewBody));
 const stats = byId("pcd-map-preview-stats").textContent;
-check("统计行给出地面校正、体素去除、栅格与占据格数", stats.includes("地面倾斜 2.17° 已校正") && stats.includes("体素去除 37 点") && stats.includes("4 × 3 px") && stats.includes("占据 3 格"), stats);
+check("统计行给出平面与局部地面校正、体素去除、栅格与占据格数", stats.includes("地面倾斜 2.17° 已校正") && stats.includes("局部地面 63 格") && stats.includes("体素去除 37 点") && stats.includes("4 × 3 px") && stats.includes("占据 3 格"), stats);
 check("预览面板展开", byId("pcd-map-preview-wrap").hidden === false);
 check("状态行提示切片完成", byId("pcd-convert-status").textContent.includes("切片完成"), byId("pcd-convert-status").textContent);
 

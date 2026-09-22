@@ -271,7 +271,7 @@
               <label>边缘留白 / m<input id="pcd-padding" type="number" step="0.05" value="0.25" /></label>
               <label class="convert-name-field">输出地图名<input id="pcd-output-name" type="text" maxlength="48" autocomplete="off" spellcheck="false" placeholder="留空＝沿用点云名称" /></label>
             </div>
-            <p class="field-help">「自动地面」会估计倾斜地面，避免远处地面变成黑色障碍。「结构体素」参考 ROGMap 的体素列与八邻域分类：删除没有垂直结构、也没有水平邻居支撑的孤立单体素。</p>
+            <p class="field-help">「自动地面」先校正整体倾斜，再跟随缓慢的局部地面起伏，避免远处或不平整地面变成黑色障碍，同时保护约 10 cm 的路沿、台阶。「结构体素」参考 ROGMap 的体素列与八邻域分类：删除没有垂直结构、也没有水平邻居支撑的孤立单体素。</p>
             <div class="convert-param-actions">
               <button class="text-button" id="pcd-defaults-button" type="button">恢复默认值</button>
               <button class="tool-button" id="pcd-map-preview-button" type="button" disabled>预览二维切片</button>

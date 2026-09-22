@@ -126,12 +126,12 @@ colcon build --symlink-install --packages-select small_point_lio \
 
 1. 把 `.pcd` 文件放入本项目的 `data/pcd/`；文件名主体需符合地图名规则（字母、数字、点、短横线或下划线，最长 48 字符）。
 2. 在“实时建图”右侧滚动到“点云转二维图”，点击刷新并选择文件。
-3. 调整切片参数：默认高度基准为「自动地面」，后端会在 0.5 m XY 网格内取低位高度样本，再用确定性 RANSAC 拟合主地面平面。「障碍下限–障碍上限」据此按**相对地面高度**判定，因 LIO 俯仰/横滚偏差而倾斜的远处地面不会再落入障碍切片。「全局 Z」保留原有绝对坐标语义，供无法稳定拟合地面或需要固定 Z 带的场景使用。离群点默认用「结构体素」滤波，另可选原有的「半径邻域」或完全关闭。数值留空表示沿用后端启动参数。首次进入时以后端默认值填充，操作者一旦改动就不再被状态轮询覆盖，点“恢复默认值”可拉回。
+3. 调整切片参数：默认高度基准为「自动地面」。后端先在 0.5 m XY 网格内取低位高度样本，用确定性 RANSAC 拟合主地面平面以校正 LIO 俯仰/横滚；随后在 0.4 m 网格上从严格的地面种子向相邻缓变单元生长，并在 2 m 范围内插值局部高度，继续补偿长走廊中的缓慢起伏与轨迹弯曲。种子带和相邻步长刻意低于常见 10 cm 路沿，避免把台阶或低平台吸收到地面中。「障碍下限–障碍上限」据此按**相对局部地面高度**判定。「全局 Z」保留原有绝对坐标语义，供无法稳定拟合地面或需要固定 Z 带的场景使用。离群点默认用「结构体素」滤波，另可选原有的「半径邻域」或完全关闭。数值留空表示沿用后端启动参数。首次进入时以后端默认值填充，操作者一旦改动就不再被状态轮询覆盖，点“恢复默认值”可拉回。
 4. 点“在三维预览中查看当前切片”：累计点云卡片下方会加载该 PCD，并使用与二维转换相同的高度基准和上下限选点，用来判断切片是否切到墙、地面或天花板。
 5. 点“预览二维切片”：后端在内存里完成切片、离群点滤波与栅格化，返回一张 PGM 预览和完整元数据（栅格尺寸、分辨率、原点、切片点数、滤波后点数、去除点数、占据格数）。预览不写任何文件；栅格过大时按整数倍做“取最暗值”降采样，只影响显示，细墙不会在预览里消失。
 6. 确认无误后点“生成 PGM · YAML”。可填“输出地图名”，留空则沿用点云名称；同名地图已存在时自动加时间戳，绝不覆盖旧图。
 
-预览走 `POST /api/pcd/map-preview`，请求体为 `{"map_name":"...", "height_mode":"ground", "filter_mode":"voxel", "filter_voxel_size":0.10, "z_min":…, "z_max":…, "resolution":…, "radius":…, "min_neighbors":…, "padding":…}`。`height_mode` 可为 `ground`/`absolute`；`filter_mode` 可为 `voxel`/`radius`/`none`。响应体是二进制 PGM（P5），几何与统计通过 `X-Map-*` 响应头返回，包括 `X-Map-Filter-Mode` 和 `X-Map-Filter-Removed`；自动地面模式另用 `X-Map-Ground-A/B/C` 和 `X-Map-Ground-Tilt` 回报拟合平面与倾角。转换走 `POST /api/pcd/convert`，请求体在上述切片参数之外可再加 `"output_name"`。两个接口都只在 `IDLE`/`SAVED`/`ERROR` 状态可用，建图或保存进行中返回 409。
+预览走 `POST /api/pcd/map-preview`，请求体为 `{"map_name":"...", "height_mode":"ground", "filter_mode":"voxel", "filter_voxel_size":0.10, "z_min":…, "z_max":…, "resolution":…, "radius":…, "min_neighbors":…, "padding":…}`。`height_mode` 可为 `ground`/`absolute`；`filter_mode` 可为 `voxel`/`radius`/`none`。响应体是二进制 PGM（P5），几何与统计通过 `X-Map-*` 响应头返回，包括 `X-Map-Filter-Mode` 和 `X-Map-Filter-Removed`；自动地面模式另用 `X-Map-Ground-A/B/C`、`X-Map-Ground-Tilt` 以及 `X-Map-Ground-Local-*` 回报整体平面、倾角和局部地面网格统计。转换走 `POST /api/pcd/convert`，请求体在上述切片参数之外可再加 `"output_name"`。两个接口都只在 `IDLE`/`SAVED`/`ERROR` 状态可用，建图或保存进行中返回 409。
 
 「结构体素」借鉴 ROGMap 投影层的体素列和八邻域分类：先按三维体素去重，再保留同一 XY 列中占有至少两个 Z 体素的垂直结构，或有任一八邻域占据列支撑的水平结构；只删除两者都不满足的孤立单体素列。这能保留细墙、路沿和杆状障碍，同时比“某个半径内必须有 N 个点”更不受近密远疏的点云密度影响。它不是 ROGMap 完整的 `OCCUPIED / KNOWN_FREE / UNKNOWN` 概率分类：单个已保存 PCD 没有每条激光射线的 hit/miss 时序证据，因而无法在离线转换时真实重建那三类状态。
 
@@ -179,7 +179,7 @@ data/
 └── session_history/                 # 临时或 --keep-keyframe-history 保留的关键帧
 ```
 
-刚保存时 PCD 与 `/cloud_registered` 使用相同数值坐标，`map` 与点云源坐标系按单位变换记录。保存只写 `<地图名称>.pcd`；PGM/YAML 由“点云转二维图”按当时的切片参数生成。默认先拟合主地面，再保留相对地面 `0.05–1.50 m` 的点向 XY 平面投影；仅在选择「全局 Z」时，上下限才是原始点云的绝对 Z。完整 PCD 始终保存关键帧离线清理后的所有保留点，地面拟合和切片都不会改写它。二维图的有点栅格为占用，其余栅格为空闲，与现有 `pcd2pgm` 的投影语义一致。自定义 map 基准后，PCD 点、二维栅格和 terrain 都处于同一个 `map` 坐标系，YAML 栅格 yaw 保持为 0，以兼容只接收 `origin_x/origin_y` 的 HW terrain server。
+刚保存时 PCD 与 `/cloud_registered` 使用相同数值坐标，`map` 与点云源坐标系按单位变换记录。保存只写 `<地图名称>.pcd`；PGM/YAML 由“点云转二维图”按当时的切片参数生成。默认先拟合主地面并跟随局部缓变地面，再保留相对局部地面 `0.05–1.50 m` 的点向 XY 平面投影；仅在选择「全局 Z」时，上下限才是原始点云的绝对 Z。完整 PCD 始终保存关键帧离线清理后的所有保留点，地面估计和切片都不会改写它。二维图的有点栅格为占用，其余栅格为空闲，与现有 `pcd2pgm` 的投影语义一致。自定义 map 基准后，PCD 点、二维栅格和 terrain 都处于同一个 `map` 坐标系，YAML 栅格 yaw 保持为 0，以兼容只接收 `origin_x/origin_y` 的 HW terrain server。
 
 ## 常用参数
 
@@ -222,7 +222,7 @@ data/
 | `--polar-structure-span` / `--polar-height-threshold` | `0.5` / `0.4` | 候选结构最小高度跨度及其相对局部地面的最小高度（米） |
 | `--polar-max-removal-fraction` | `0.20` | 极坐标投票本身最多可删除当前输入的比例；之后仍受总安全上限限制 |
 | `--keep-keyframe-history` | 关闭 | 成功导出后保留关键帧 `.history` 目录 |
-| `--height-mode` | `ground` | 二维投影高度基准；`ground` 自动拟合倾斜地面，`absolute` 使用原始全局 Z |
+| `--height-mode` | `ground` | 二维投影高度基准；`ground` 校正整体倾斜并跟随局部缓变地面，`absolute` 使用原始全局 Z |
 | `--z-min` / `--z-max` | `0.05` / `1.50` | 障碍切片高度范围；`ground` 模式下为相对拟合地面的高度，`absolute` 模式下为全局 Z |
 | `--radius-filter` | `0.50` | 二维切片离群点滤波半径；设为 `0` 可关闭 |
 | `--min-neighbors` | `10` | 半径内最少邻点数 |

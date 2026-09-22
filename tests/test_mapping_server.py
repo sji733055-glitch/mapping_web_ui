@@ -51,6 +51,26 @@ class RequestHandlerTests(unittest.TestCase):
         self.assertEqual(headers["X-Map-Filter-Voxel-Size"], "0.1")
         self.assertEqual(headers["X-Map-Filter-Removed-Columns"], "4")
 
+    def test_preview_headers_report_local_ground_correction_statistics(self):
+        headers = occupancy_preview_headers({
+            "width": 10, "height": 8, "resolution": 0.05,
+            "origin_x": -1.0, "origin_y": -2.0,
+            "z_min": 0.05, "z_max": 1.5, "height_mode": "ground",
+            "slice_points": 100, "filtered_points": 93,
+            "occupied_cells": 20, "preview_stride": 1,
+            "preview_occupied_cells": 20,
+            "filter_mode": "none", "filter_removed_points": 0,
+            "ground_a": 0.01, "ground_b": -0.02, "ground_c": 0.3,
+            "ground_tilt_deg": 1.28, "ground_inlier_cells": 42,
+            "ground_local_cells": 90, "ground_local_anchor_cells": 63,
+            "ground_local_offset_min": -0.08, "ground_local_offset_max": 0.16,
+        })
+
+        self.assertEqual(headers["X-Map-Ground-Local-Cells"], "90")
+        self.assertEqual(headers["X-Map-Ground-Local-Anchors"], "63")
+        self.assertEqual(headers["X-Map-Ground-Local-Min"], "-0.08")
+        self.assertEqual(headers["X-Map-Ground-Local-Max"], "0.16")
+
     def test_error_headers_do_not_require_a_parsed_request_path(self):
         handler = RequestHandler.__new__(RequestHandler)
         handler._headers_buffer = []
