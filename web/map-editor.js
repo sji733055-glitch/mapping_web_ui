@@ -3,8 +3,8 @@
 
   const $ = (id) => document.getElementById(id);
   const dom = {
-    mappingTab: $("mapping-tab"), editorTab: $("editor-tab"),
-    mappingWorkspace: $("mapping-workspace"), editorWorkspace: $("editor-workspace"),
+    mappingTab: $("mapping-tab"), editorTab: $("editor-tab"), rogmapTab: $("rogmap-tab"),
+    mappingWorkspace: $("mapping-workspace"), editorWorkspace: $("editor-workspace"), rogmapWorkspace: $("rogmap-workspace"),
     canvas: $("map-editor-canvas"), canvasWrap: $("map-canvas-wrap"), empty: $("editor-empty"),
     title: $("editor-title"), layerBadge: $("editor-layer-badge"), zoomLabel: $("editor-zoom-label"),
     zoomIn: $("editor-zoom-in"), zoomOut: $("editor-zoom-out"), fit: $("editor-fit"),
@@ -81,10 +81,13 @@
   function activateSurface(editorActive) {
     dom.mappingWorkspace.hidden = editorActive;
     dom.editorWorkspace.hidden = !editorActive;
+    dom.rogmapWorkspace.hidden = true;
     dom.mappingTab.classList.toggle("is-active", !editorActive);
     dom.editorTab.classList.toggle("is-active", editorActive);
+    dom.rogmapTab.classList.remove("is-active");
     dom.mappingTab.setAttribute("aria-selected", String(!editorActive));
     dom.editorTab.setAttribute("aria-selected", String(editorActive));
+    dom.rogmapTab.setAttribute("aria-selected", "false");
     if (editorActive) {
       resizeCanvas();
       scheduleRender();
@@ -987,6 +990,18 @@
 
   dom.mappingTab.addEventListener("click", () => activateSurface(false));
   dom.editorTab.addEventListener("click", () => activateSurface(true));
+  dom.rogmapTab.addEventListener("click", () => {
+    dom.mappingWorkspace.hidden = true;
+    dom.editorWorkspace.hidden = true;
+    dom.rogmapWorkspace.hidden = false;
+    dom.mappingTab.classList.remove("is-active");
+    dom.editorTab.classList.remove("is-active");
+    dom.rogmapTab.classList.add("is-active");
+    dom.mappingTab.setAttribute("aria-selected", "false");
+    dom.editorTab.setAttribute("aria-selected", "false");
+    dom.rogmapTab.setAttribute("aria-selected", "true");
+    window.dispatchEvent(new Event("rogmap-workspace-activated"));
+  });
   dom.refresh.addEventListener("click", refreshMaps);
   dom.select.addEventListener("change", updateSourceControls);
   dom.loadOccupancy.addEventListener("click", () => loadLayer(LAYER_OCCUPANCY));

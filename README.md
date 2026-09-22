@@ -14,6 +14,7 @@
 - 在“地图编辑”工作区用笔刷、矩形或画线修整二维 PGM 占据图，并可撤销、缩放和平移；
 - 可直接在二维图上点选新 `map` 原点并拖出 `map +X` 方向，成组变换完整 PCD、PGM/YAML 和已有 terrain，为后续重定位发布 `map→odom` TF 固定统一的地图基准；
 - 把 PGM/YAML 一键转换为 HW `map_server` 使用的 terrain msgpack，再标注平地、障碍、斜坡、各级台阶、飞坡及其方向；
+- 在“ROGMap 分类”工作区直接查看 `projection_layer` 四分类，点选桌子所在格后查看 `height_delta`、占据高度、占据层数与竖直占据率，并在浏览器中 what-if 试调 surface/wall/tunnel 阈值；
 - 同时发布 `/mapping/accumulated_cloud` 与 `/mapping/status`，仍可在 RViz/Foxglove 中观察；
 - 提供 `/mapping/start`、`/mapping/stop_and_save`、`/mapping/reset` 三个 `std_srvs/srv/Trigger` 服务；
 - 输出文件已存在时自动在新文件名后加时间戳，不覆盖旧地图。
@@ -60,6 +61,29 @@ robot_state_publisher → mid360_driver → small_point_lio
 不需要把 Small Point-LIO 的 `save_pcd` 改成 `true`。本工具只在点击开始后累计 `/cloud_registered`，不会重启 LIO，也不会改变 LIO 的 odom 原点。
 
 网页启动的 ROS 进程日志位于 `.ros/managed/`。关闭网页标签不会停止节点；结束 `run.sh` 时，会清理由该网页后端启动的节点。
+
+## ROGMap 投影分类诊断
+
+页头的“ROGMap 分类”是一个只读诊断面，不修改导航仓库或正在运行的 ROGMap。后端使用 best-effort QoS 订阅：
+
+```text
+/rog_map/layer_type          nav_msgs/msg/OccupancyGrid
+/rog_map/layer_height_delta  sensor_msgs/msg/PointCloud2 (z=占据最高点, intensity=height_delta)
+/rog_map/occupied            sensor_msgs/msg/PointCloud2
+```
+
+`layer_type` 的实际四类仍以 ROGMap 发布值为准：`-1=UNKNOWN`、`33=FREE`、`66=PASSABLE`、`100=OCCUPIED`。页面另外复刻 `classifyCell()` 的判定顺序，将有占据高度的柱细分为薄面、实心墙、中空 tunnel 和模糊障碍。点选一格后会显示：
+
+- `height_delta = (最高占据层号 - 最低占据层号) × resolution`；
+- `vertical_occupancy_ratio = (occupied_count - 1) × resolution / height_delta`；
+- 是否同时满足 `tunnel_height_delta_min ≤ height_delta ≤ tunnel_height_delta_max` 和 `ratio ≤ tunnel_occupancy_ratio_max`；
+- 实际 `layer_type` 与当前 what-if 阈值推演出的原始分支。
+
+竖直占据率不是 ROGMap 现有可视化话题的直接字段。后端只在三路快照时间对齐，且 `/rog_map/occupied` 同时覆盖该柱的最低/最高占据端点时，才按唯一 Z 体素层数重建 ratio。可视化范围裁切、decay active list 或快照不同步时，格子会明确标成“ratio 不可用”，不会用不完整占据云猜测。
+
+右侧 6 个阈值仅用于浏览器 what-if 重上色；非法关系（例如 `surface_max ≥ tunnel_min` 或 `tunnel_ratio_max ≥ wall_ratio_min`）会当场拦截。后端默认基线对齐当前 `planner_params.yaml`，也可用 `--rogmap-*-...` 启动参数覆盖。真正调参仍要修改 `planner.rog_map.projection.*` 并重启 `nav_executor`：ROGMap 当前没有将这组参数热更新到分类器的回调。
+
+二进制诊断接口为 `GET /api/rogmap/projection`，返回固定步长的 `ROG1` 格网；它和页面轮询都走同源 HTTP，因此 VS Code Remote SSH 不转发 WebSocket 时仍可用。
 
 ## 本地 Small Point-LIO 源码
 

@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -59,6 +59,11 @@ try:
         write_mapping_report,
     )
     from .map_frame_core import align_map_frame, initialize_frame_metadata, map_frame_status
+    from .rogmap_debug import (
+        ProjectionConfig,
+        build_projection_snapshot,
+        encode_projection_snapshot,
+    )
     from .terrain_core import (
         EDITOR_HEADER,
         MAX_EDITOR_CELLS,
@@ -95,6 +100,11 @@ except ImportError:
         write_mapping_report,
     )
     from map_frame_core import align_map_frame, initialize_frame_metadata, map_frame_status
+    from rogmap_debug import (
+        ProjectionConfig,
+        build_projection_snapshot,
+        encode_projection_snapshot,
+    )
     from terrain_core import (
         EDITOR_HEADER,
         MAX_EDITOR_CELLS,
@@ -593,6 +603,24 @@ class MappingSupervisor(Node):
         self._history_last_at = 0.0
         self._history_offline_result: dict[str, object] = {}
 
+        # ROGMap projection diagnostics are independent of mapping sessions.
+        # Each callback keeps only the latest visualization snapshot, so the
+        # browser can inspect a live cell without creating an unbounded history.
+        self._rogmap_lock = threading.RLock()
+        self._rogmap_type: Optional[dict[str, Any]] = None
+        self._rogmap_height: Optional[dict[str, Any]] = None
+        self._rogmap_occupied: Optional[dict[str, Any]] = None
+        self._rogmap_last_error = ""
+        self._rogmap_config = ProjectionConfig(
+            surface_height_delta_max=settings.rogmap_surface_height_delta_max,
+            wall_height_delta_min=settings.rogmap_wall_height_delta_min,
+            wall_occupancy_ratio_min=settings.rogmap_wall_occupancy_ratio_min,
+            tunnel_height_delta_min=settings.rogmap_tunnel_height_delta_min,
+            tunnel_height_delta_max=settings.rogmap_tunnel_height_delta_max,
+            tunnel_occupancy_ratio_max=settings.rogmap_tunnel_occupancy_ratio_max,
+        )
+        self._rogmap_config.validate()
+
         retained_qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -602,6 +630,24 @@ class MappingSupervisor(Node):
         self.create_subscription(PointCloud2, settings.cloud_topic, self._on_cloud, qos_profile_sensor_data)
         if settings.odom_topic:
             self.create_subscription(Odometry, settings.odom_topic, self._on_odom, qos_profile_sensor_data)
+        self.create_subscription(
+            OccupancyGrid,
+            settings.rogmap_layer_type_topic,
+            self._on_rogmap_layer_type,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            PointCloud2,
+            settings.rogmap_height_delta_topic,
+            self._on_rogmap_height_delta,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            PointCloud2,
+            settings.rogmap_occupied_topic,
+            self._on_rogmap_occupied,
+            qos_profile_sensor_data,
+        )
         self.create_service(Trigger, "/mapping/start", self._start_service)
         self.create_service(Trigger, "/mapping/stop_and_save", self._stop_service)
         self.create_service(Trigger, "/mapping/reset", self._reset_service)
@@ -615,6 +661,164 @@ class MappingSupervisor(Node):
     @staticmethod
     def _stamp_nanoseconds(stamp: Time) -> int:
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+    @staticmethod
+    def _stamp_seconds(stamp: Time) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1.0e-9
+
+    def _on_rogmap_layer_type(self, message: OccupancyGrid) -> None:
+        try:
+            width = int(message.info.width)
+            height = int(message.info.height)
+            values = np.asarray(message.data, dtype=np.int8).reshape(-1).copy()
+            if width <= 0 or height <= 0 or values.size != width * height:
+                raise ValueError("layer_type 栅格尺寸与数据长度不一致")
+            resolution = float(message.info.resolution)
+            origin_x = float(message.info.origin.position.x)
+            origin_y = float(message.info.origin.position.y)
+            if not math.isfinite(resolution) or resolution <= 0.0:
+                raise ValueError("layer_type 分辨率无效")
+            snapshot = {
+                "width": width,
+                "height": height,
+                "resolution": resolution,
+                "origin_x": origin_x,
+                "origin_y": origin_y,
+                "frame_id": str(message.header.frame_id),
+                "stamp": self._stamp_seconds(message.header.stamp),
+                "received_at": time.monotonic(),
+                "values": values,
+            }
+            with self._rogmap_lock:
+                self._rogmap_type = snapshot
+                self._rogmap_last_error = ""
+        except Exception as error:
+            with self._rogmap_lock:
+                self._rogmap_last_error = f"layer_type: {error}"
+            self.get_logger().warning(f"ROGMap layer_type diagnostic failed: {error}")
+
+    def _on_rogmap_height_delta(self, message: PointCloud2) -> None:
+        try:
+            points = point_cloud2.read_points_numpy(
+                message,
+                field_names=["x", "y", "z", "intensity"],
+                skip_nans=False,
+            )
+            values = np.asarray(points, dtype=np.float32)
+            if values.size == 0:
+                values = np.empty((0, 4), dtype=np.float32)
+            else:
+                values = np.ascontiguousarray(values.reshape(-1, 4), dtype=np.float32)
+            snapshot = {
+                "frame_id": str(message.header.frame_id),
+                "stamp": self._stamp_seconds(message.header.stamp),
+                "received_at": time.monotonic(),
+                "points": values,
+            }
+            with self._rogmap_lock:
+                self._rogmap_height = snapshot
+                self._rogmap_last_error = ""
+        except Exception as error:
+            with self._rogmap_lock:
+                self._rogmap_last_error = f"layer_height_delta: {error}"
+            self.get_logger().warning(f"ROGMap height-delta diagnostic failed: {error}")
+
+    def _on_rogmap_occupied(self, message: PointCloud2) -> None:
+        try:
+            points = point_cloud2.read_points_numpy(
+                message,
+                field_names=["x", "y", "z"],
+                skip_nans=True,
+            )
+            values = np.asarray(points, dtype=np.float32)
+            if values.size == 0:
+                values = np.empty((0, 3), dtype=np.float32)
+            else:
+                values = np.ascontiguousarray(values.reshape(-1, 3), dtype=np.float32)
+            snapshot = {
+                "frame_id": str(message.header.frame_id),
+                "stamp": self._stamp_seconds(message.header.stamp),
+                "received_at": time.monotonic(),
+                "points": values,
+            }
+            with self._rogmap_lock:
+                self._rogmap_occupied = snapshot
+                self._rogmap_last_error = ""
+        except Exception as error:
+            with self._rogmap_lock:
+                self._rogmap_last_error = f"occupied: {error}"
+            self.get_logger().warning(f"ROGMap occupied diagnostic failed: {error}")
+
+    def rogmap_projection_frame(self) -> bytes:
+        """Return the latest aligned ROGMap diagnostic grid as ``ROG1``."""
+        with self._rogmap_lock:
+            if self._rogmap_type is None:
+                raise RuntimeError("尚未收到 /rog_map/layer_type")
+            layer = {
+                **self._rogmap_type,
+                "values": self._rogmap_type["values"].copy(),
+            }
+            height = (
+                {**self._rogmap_height, "points": self._rogmap_height["points"].copy()}
+                if self._rogmap_height is not None
+                else {"stamp": math.nan, "points": np.empty((0, 4), dtype=np.float32)}
+            )
+            occupied = (
+                {**self._rogmap_occupied, "points": self._rogmap_occupied["points"].copy()}
+                if self._rogmap_occupied is not None
+                else {"stamp": math.nan, "points": np.empty((0, 3), dtype=np.float32)}
+            )
+        snapshot = build_projection_snapshot(
+            cell_type=layer["values"],
+            width=layer["width"],
+            height=layer["height"],
+            resolution=layer["resolution"],
+            origin_x=layer["origin_x"],
+            origin_y=layer["origin_y"],
+            type_stamp=layer["stamp"],
+            height_points=height["points"],
+            height_stamp=height["stamp"],
+            occupied_points=occupied["points"],
+            occupied_stamp=occupied["stamp"],
+            config=self._rogmap_config,
+        )
+        return encode_projection_snapshot(snapshot)
+
+    def rogmap_status(self, now: Optional[float] = None) -> dict[str, Any]:
+        checked_at = time.monotonic() if now is None else now
+        with self._rogmap_lock:
+            layer = self._rogmap_type
+            height = self._rogmap_height
+            occupied = self._rogmap_occupied
+            error = self._rogmap_last_error
+
+            def source_status(source: Optional[dict[str, Any]]) -> dict[str, Any]:
+                age = checked_at - float(source["received_at"]) if source else math.inf
+                return {
+                    "online": bool(source and age < 2.5),
+                    "age_seconds": age if math.isfinite(age) else None,
+                    "stamp": float(source["stamp"]) if source else None,
+                }
+
+            result = {
+                "ready": bool(layer and checked_at - float(layer["received_at"]) < 2.5),
+                "frame_id": str(layer.get("frame_id", "")) if layer else "",
+                "width": int(layer.get("width", 0)) if layer else 0,
+                "height": int(layer.get("height", 0)) if layer else 0,
+                "resolution": float(layer.get("resolution", 0.0)) if layer else 0.0,
+                "layer_type": source_status(layer),
+                "height_delta": source_status(height),
+                "occupied": source_status(occupied),
+                "config": self._rogmap_config.as_dict(),
+                "config_source": "mapping_web_ui 启动参数（默认对齐 planner_params.yaml）",
+                "last_error": error,
+                "topics": {
+                    "layer_type": self.settings.rogmap_layer_type_topic,
+                    "height_delta": self.settings.rogmap_height_delta_topic,
+                    "occupied": self.settings.rogmap_occupied_topic,
+                },
+            }
+        return result
 
     def _reset_dynamic_stats(self) -> None:
         self._dynamic_stats = {
@@ -945,6 +1149,7 @@ class MappingSupervisor(Node):
                 "message": self._message,
                 "output": self._output,
                 "stack": self.stack_status(),
+                "rogmap_projection": self.rogmap_status(now),
             }
 
     def _graph_nodes(self) -> set[str]:
@@ -1776,6 +1981,25 @@ class RequestHandler(SimpleHTTPRequestHandler):
             except OSError as error:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "message": str(error)})
             return
+        if request_path == "/api/rogmap/projection":
+            try:
+                body = self.server.controller.rogmap_projection_frame()
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    body,
+                    "application/x-rogmap-projection",
+                )
+            except RuntimeError as error:
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"ok": False, "message": str(error)},
+                )
+            except (OSError, ValueError) as error:
+                self._send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "message": str(error)},
+                )
+            return
         if request_path == "/api/pcd/preview":
             query = parse_qs(parsed.query)
             try:
@@ -2120,6 +2344,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
     parser.set_defaults(stack_control=True)
     parser.add_argument("--cloud-topic", default="/cloud_registered")
     parser.add_argument("--odom-topic", default="/Odometry")
+    parser.add_argument("--rogmap-layer-type-topic", default="/rog_map/layer_type")
+    parser.add_argument("--rogmap-height-delta-topic", default="/rog_map/layer_height_delta")
+    parser.add_argument("--rogmap-occupied-topic", default="/rog_map/occupied")
+    parser.add_argument("--rogmap-surface-height-delta-max", type=float, default=0.20)
+    parser.add_argument("--rogmap-wall-height-delta-min", type=float, default=0.80)
+    parser.add_argument("--rogmap-wall-occupancy-ratio-min", type=float, default=0.90)
+    parser.add_argument("--rogmap-tunnel-height-delta-min", type=float, default=0.25)
+    parser.add_argument("--rogmap-tunnel-height-delta-max", type=float, default=0.40)
+    parser.add_argument("--rogmap-tunnel-occupancy-ratio-max", type=float, default=0.45)
     parser.add_argument("--voxel-size", type=float, default=0.05)
     parser.add_argument("--max-points", type=int, default=5_000_000)
     parser.add_argument("--web-max-points", type=int, default=220_000)
@@ -2254,6 +2487,17 @@ def main() -> int:
         parser.error("keyframe max removal fraction must be between zero and one")
     try:
         polar_disappearance_config(settings).validate()
+    except ValueError as error:
+        parser.error(str(error))
+    try:
+        ProjectionConfig(
+            surface_height_delta_max=settings.rogmap_surface_height_delta_max,
+            wall_height_delta_min=settings.rogmap_wall_height_delta_min,
+            wall_occupancy_ratio_min=settings.rogmap_wall_occupancy_ratio_min,
+            tunnel_height_delta_min=settings.rogmap_tunnel_height_delta_min,
+            tunnel_height_delta_max=settings.rogmap_tunnel_height_delta_max,
+            tunnel_occupancy_ratio_max=settings.rogmap_tunnel_occupancy_ratio_max,
+        ).validate()
     except ValueError as error:
         parser.error(str(error))
     web_dir = Path(settings.web_dir).expanduser().resolve()

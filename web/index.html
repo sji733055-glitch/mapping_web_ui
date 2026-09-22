@@ -24,6 +24,7 @@
         <nav class="surface-tabs" aria-label="控制台工作区">
           <button class="surface-tab is-active" id="mapping-tab" type="button" aria-controls="mapping-workspace" aria-selected="true">实时建图</button>
           <button class="surface-tab" id="editor-tab" type="button" aria-controls="editor-workspace" aria-selected="false">地图编辑</button>
+          <button class="surface-tab" id="rogmap-tab" type="button" aria-controls="rogmap-workspace" aria-selected="false">ROGMap 分类</button>
         </nav>
         <div class="header-status">
           <span class="connection-pill is-offline" id="connection-pill">
@@ -398,6 +399,89 @@
           </section>
         </aside>
       </section>
+
+      <section class="rogmap-workspace" id="rogmap-workspace" aria-label="ROGMap 投影层分类诊断" hidden>
+        <section class="rogmap-canvas-card">
+          <div class="editor-heading">
+            <div>
+              <p class="section-kicker">LIVE PROJECTION LAYER</p>
+              <h2>ROGMap 柱分类</h2>
+            </div>
+            <div class="editor-heading-tools">
+              <span class="layer-badge" id="rogmap-live-badge">等待数据</span>
+              <select class="rogmap-view-select" id="rogmap-view-mode" aria-label="ROGMap 显示模式">
+                <option value="reason">分类原因</option>
+                <option value="actual">实际类型</option>
+                <option value="tunnel">仅突出 tunnel</option>
+              </select>
+              <button class="tool-button" id="rogmap-zoom-out" type="button" aria-label="缩小 ROGMap">−</button>
+              <button class="tool-button" id="rogmap-zoom-in" type="button" aria-label="放大 ROGMap">＋</button>
+              <button class="tool-button" id="rogmap-fit" type="button">适应视图</button>
+            </div>
+          </div>
+          <div class="rogmap-canvas-wrap" id="rogmap-canvas-wrap">
+            <canvas id="rogmap-canvas" aria-label="ROGMap 投影分类栅格"></canvas>
+            <div class="editor-empty" id="rogmap-empty">
+              <strong>等待 ROGMap 可视化话题</strong>
+              <span>需要 nav_executor 运行且 <code>visualization.enable: true</code></span>
+            </div>
+            <div class="rogmap-legend" aria-label="ROGMap 分类图例">
+              <span><i class="unknown"></i>未知</span>
+              <span><i class="free"></i>空列</span>
+              <span><i class="thin"></i>薄面</span>
+              <span><i class="tunnel"></i>中空 tunnel</span>
+              <span><i class="wall"></i>实心墙</span>
+              <span><i class="ambiguous"></i>模糊障碍</span>
+              <span><i class="unavailable"></i>ratio 不可用</span>
+            </div>
+          </div>
+          <div class="editor-footer">
+            <span id="rogmap-cell-coordinate">栅格 —</span>
+            <span id="rogmap-world-coordinate">世界坐标 —</span>
+            <span id="rogmap-frame-id">坐标系 —</span>
+            <span class="editor-dirty" id="rogmap-update-age">未收到数据</span>
+          </div>
+        </section>
+
+        <aside class="rogmap-rail">
+          <section class="control-card rogmap-cell-card">
+            <div class="compact-title-row">
+              <h2>选中格诊断</h2>
+              <span id="rogmap-cell-class">未选择</span>
+            </div>
+            <div class="rogmap-cell-values">
+              <div><span>实际 layer_type</span><b id="rogmap-actual-type">—</b></div>
+              <div><span>what-if 分支</span><b id="rogmap-predicted-reason">—</b></div>
+              <div><span>height_delta</span><b id="rogmap-height-delta">—</b></div>
+              <div><span>占据高度范围</span><b id="rogmap-height-range">—</b></div>
+              <div><span>占据层数</span><b id="rogmap-occupied-count">—</b></div>
+              <div><span>vertical ratio</span><b id="rogmap-ratio">—</b></div>
+            </div>
+            <div class="rogmap-rule-result" id="rogmap-rule-result">在图上点选桌子所在的格子，这里会显示它是否命中 tunnel 高度和 ratio 条件。</div>
+          </section>
+
+          <section class="control-card rogmap-params-card">
+            <div class="compact-title-row"><h2>分类阈值·what-if</h2><span id="rogmap-config-state">本地推演</span></div>
+            <p class="convert-note">只在浏览器里重算颜色，不修改 ROS 参数。真正生效仍需改 planner_params.yaml 并重启 nav_executor。</p>
+            <div class="rogmap-param-grid">
+              <label>surface delta max / m<input id="rogmap-surface-max" type="number" step="0.05" /></label>
+              <label>wall delta min / m<input id="rogmap-wall-min" type="number" step="0.05" /></label>
+              <label>wall ratio min<input id="rogmap-wall-ratio" type="number" min="0" max="1" step="0.05" /></label>
+              <label>tunnel delta min / m<input id="rogmap-tunnel-min" type="number" step="0.05" /></label>
+              <label>tunnel delta max / m<input id="rogmap-tunnel-max" type="number" step="0.05" /></label>
+              <label>tunnel ratio max<input id="rogmap-tunnel-ratio" type="number" min="0" max="1" step="0.05" /></label>
+            </div>
+            <button class="text-button" id="rogmap-reset-params" type="button">恢复后端基线值</button>
+            <p class="rogmap-validation" id="rogmap-validation">等待参数…</p>
+          </section>
+
+          <section class="control-card rogmap-summary-card">
+            <div class="compact-title-row"><h2>当前窗口分类</h2><span id="rogmap-grid-size">—</span></div>
+            <div class="rogmap-counts" id="rogmap-counts"></div>
+            <p class="rogmap-source-note" id="rogmap-source-note">正在连接 ROGMap 诊断话题…</p>
+          </section>
+        </aside>
+      </section>
       </div>
 
       <footer class="statusbar">
@@ -412,5 +496,6 @@
     <script src="/point-cloud-viewer.js"></script>
     <script src="/app.js"></script>
     <script src="/map-editor.js"></script>
+    <script src="/rogmap-projection.js"></script>
   </body>
 </html>

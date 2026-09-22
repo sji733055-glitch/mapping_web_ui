@@ -1,5 +1,11 @@
 # Change history
 
+## 2026-09-22 — 网页新增 ROGMap projection_layer 逐格 tunnel 诊断
+
+- 实时数据与完整性：`backend/mapping_server.py` 用 best-effort QoS 订阅 `/rog_map/layer_type`、`/rog_map/layer_height_delta` 和 `/rog_map/occupied`，不改动导航仓库或 ROGMap 本体。新增 ROS 无关的 `backend/rogmap_debug.py`，把四分类格、占据最高点与 `height_delta` 对齐到同一滑动窗口，再按唯一 Z 体素层数重建 `vertical_occupancy_ratio=(occupied_count-1)*resolution/height_delta`。只有三路快照在 0.25 s 内对齐、且占据云同时覆盖柱内最低/最高端点时才标记 ratio 有效；可视化裁切、active-list 缺层或数据不同步时显式返回“ratio 不可用”，不生成假数值。同源 HTTP 新增 `GET /api/rogmap/projection` 的固定步长 `ROG1` 载荷，`/api/status.rogmap_projection` 回报三路新鲜度、几何、话题名和分类基线。
+- 操作面：`web/index.html`、`web/styles.css`、`web/map-editor.js` 和新增的 `web/rogmap-projection.js` 加入第三个“ROGMap 分类”工作区。格网可拖动、缩放、自适应，可切换实际四类、分类原因和只突出 tunnel；点选桌子所在格后显示世界坐标、实际 `layer_type`、`height_delta`、占据高度范围、占据层数、ratio 与每条 tunnel 判定的通过/失败。右侧可本地 what-if 试调 surface/wall/tunnel 的 6 个阈值，实时重算整图与类别数量，并按 ROGMap 启动校验拦截非法参数关系；该操作明确不写 ROS 参数，真正生效仍需改 YAML 并重启。`README.md` 补充了话题、公式、可信边界与 HTTP 兼容模式说明。
+- 回归与验证：`tests/test_rogmap_debug.py` 覆盖参数派生约束、墙分支优先于 tunnel、两端覆盖时 ratio 重建、缺端点/不同步时拒绝报 ratio 以及 `ROG1` 字节布局；`tests/rogmap_projection_harness.mjs` 直接加载真实前端模块，验证解码、tunnel 判定、ratio 缺失和非法参数。全部通过：`python3 -m compileall -q backend tests`；`python3 -m unittest discover -s tests -v`（57 项）；4 个前端文件的 `node --check`；4 个 Node harness；`bash -n run.sh`；`git diff --check`。另在隔离端口 18794 / `ROS_DOMAIN_ID=94` 启动真实后端：`/api/status` 正常返回离线 ROGMap 状态与 6 个基线值，`/api/cloud` 为合法空 `MAP1`，未有 ROGMap 数据时新接口正确返回 HTTP 503，随后精确停止后端并清理临时目录。未连接真实雷达/导航链，因此未用现场桌子实测 ratio 与类型一致率；未进行真实浏览器视觉验收。
+
 ## 2026-09-22 — terrain 产物对齐导航端 MessagePack ARRAY
 
 - 根因与修正：`backend/terrain_core.py` 原先把 `terrain` / `direction` 编码为 MessagePack BIN，但当前 `/home/mas/mas_nav_2027_native` 的 `map_server::load_terrain_msgpack()` 直接通过 `via.array` 逐项读取，两者不再兼容。新写入的 terrain 现在使用 fixarray/array16/array32，0–127 使用 positive fixint，128–255 使用 uint8，可被导航端当前加载器原样读取。读取端仍保留旧 BIN 兼容，历史地图可继续打开并在下次保存时无损迁移。
