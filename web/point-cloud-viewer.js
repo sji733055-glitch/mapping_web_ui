@@ -91,6 +91,7 @@
       this.gl = canvas.getContext("webgl", { antialias: true, alpha: false });
       if (!this.gl) throw new Error("浏览器不支持 WebGL");
       this.points = new Float32Array(0);
+      this.pendingPoints = null;
       this.bounds = null;
       this.yaw = -0.72; this.pitch = 0.78; this.distance = 18; this.target = [0, 0, 0];
       this.drag = null; this.needsRender = true;
@@ -101,6 +102,17 @@
       const gl = this.gl;
       this.pointProgram = program(gl, vertexShaderSource, fragmentShaderSource);
       this.lineProgram = program(gl, lineVertexSource, lineFragmentSource);
+      this.pointLocations = {
+        mvp: gl.getUniformLocation(this.pointProgram,"uMvp"),
+        size: gl.getUniformLocation(this.pointProgram,"uPointSize"),
+        height: gl.getUniformLocation(this.pointProgram,"uHeightRange"),
+        position: gl.getAttribLocation(this.pointProgram,"aPosition")
+      };
+      this.lineLocations = {
+        mvp: gl.getUniformLocation(this.lineProgram,"uMvp"),
+        color: gl.getUniformLocation(this.lineProgram,"uColor"),
+        position: gl.getAttribLocation(this.lineProgram,"aPosition")
+      };
       this.pointBuffer = gl.createBuffer(); this.gridBuffer = gl.createBuffer(); this.axisBuffer = gl.createBuffer();
       const grid = [];
       for (let i=-20; i<=20; i++) { grid.push(-20,i,0, 20,i,0, i,-20,0, i,20,0); }
@@ -111,20 +123,58 @@
     }
 
     _bind() {
-      this.canvas.addEventListener("pointerdown", (e) => { this.canvas.setPointerCapture(e.pointerId); this.drag = { x:e.clientX, y:e.clientY, button:e.button }; });
-      this.canvas.addEventListener("pointermove", (e) => {
-        if (!this.drag) return;
-        const dx=e.clientX-this.drag.x, dy=e.clientY-this.drag.y; this.drag.x=e.clientX; this.drag.y=e.clientY;
-        if (this.drag.button === 2) {
-          const scale=this.distance*0.0018; const cy=Math.cos(this.yaw), sy=Math.sin(this.yaw);
-          this.target[0] += (-cy*dx + sy*dy)*scale; this.target[1] += (-sy*dx - cy*dy)*scale;
-        } else { this.yaw -= dx*0.006; this.pitch=Math.max(0.03,Math.min(1.53,this.pitch+dy*0.006)); }
-        this.needsRender=true;
+      this.canvas.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+        this.canvas.setPointerCapture(e.pointerId);
+        this.drag = {
+          x:e.clientX, y:e.clientY, pointerId:e.pointerId,
+          mode:e.button === 2 ? "zoom" : e.button === 1 || e.shiftKey ? "pan" : "orbit"
+        };
+        e.preventDefault();
       });
-      this.canvas.addEventListener("pointerup", () => { this.drag=null; });
-      this.canvas.addEventListener("pointercancel", () => { this.drag=null; });
+      this.canvas.addEventListener("pointermove", (e) => {
+        if (!this.drag || this.drag.pointerId !== e.pointerId) return;
+        const samples=typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : null;
+        const point=samples?.length ? samples[samples.length-1] : e;
+        const dx=point.clientX-this.drag.x, dy=point.clientY-this.drag.y;
+        this.drag.x=point.clientX; this.drag.y=point.clientY;
+        if (this.drag.mode === "zoom") {
+          // Match RViz Orbit: right-drag up zooms in, down zooms out.
+          this.distance=Math.max(.4,Math.min(800,this.distance*Math.max(.05,1+dy*.01)));
+        } else if (this.drag.mode === "pan") {
+          // Translate in the camera plane so the cloud stays under the pointer
+          // at every zoom level and viewing angle.
+          const scale=2*this.distance*Math.tan(Math.PI/8)/Math.max(1,this.canvas.clientHeight);
+          const cy=Math.cos(this.yaw), sy=Math.sin(this.yaw), cp=Math.cos(this.pitch), sp=Math.sin(this.pitch);
+          const rightX=-sy, rightY=cy, upX=-sp*cy, upY=-sp*sy;
+          this.target[0] += (-rightX*dx + upX*dy)*scale;
+          this.target[1] += (-rightY*dx + upY*dy)*scale;
+          this.target[2] += cp*dy*scale;
+        } else {
+          // RViz OrbitViewController::rotateCamera(): yaw(diff_x * 0.005)
+          // and pitch(-diff_y * 0.005), after its property sign conventions.
+          this.yaw -= dx*0.005;
+          this.pitch=Math.max(0.03,Math.min(1.54,this.pitch+dy*0.005));
+        }
+        this.needsRender=true;
+        e.preventDefault();
+      });
+      const finishDrag=(e) => {
+        if (!this.drag || (e.pointerId !== undefined && this.drag.pointerId !== e.pointerId)) return;
+        this.drag=null;
+        this.needsRender=true;
+      };
+      this.canvas.addEventListener("pointerup", finishDrag);
+      this.canvas.addEventListener("pointercancel", finishDrag);
+      this.canvas.addEventListener("lostpointercapture", finishDrag);
       this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-      this.canvas.addEventListener("wheel", (e) => { e.preventDefault(); this.distance=Math.max(.4,Math.min(800,this.distance*Math.exp(e.deltaY*.001))); this.needsRender=true; }, { passive:false });
+      this.canvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const unit=e.deltaMode===1?16:e.deltaMode===2?Math.max(1,this.canvas.clientHeight):1;
+        const delta=Math.max(-240,Math.min(240,e.deltaY*unit));
+        this.distance=Math.max(.4,Math.min(800,this.distance*Math.exp(delta*.0015)));
+        this.needsRender=true;
+      }, { passive:false });
       window.addEventListener("resize", () => this._resize());
     }
 
@@ -136,7 +186,16 @@
     resize() { this._resize(); }
 
     setPoints(points) {
-      this.points=points;
+      this.pendingPoints=points;
+      // Uploading and scanning a multi-megabyte live cloud can monopolize the
+      // main thread.  Keep the current GPU buffer stable while the operator is
+      // dragging; multiple incoming snapshots collapse to the newest one.
+      if (!this.drag) this._commitPendingPoints();
+    }
+
+    _commitPendingPoints() {
+      if (!this.pendingPoints) return;
+      const points=this.pendingPoints; this.pendingPoints=null; this.points=points;
       const gl=this.gl; gl.bindBuffer(gl.ARRAY_BUFFER,this.pointBuffer); gl.bufferData(gl.ARRAY_BUFFER,points,gl.DYNAMIC_DRAW);
       if (points.length) {
         let minX=Infinity,minY=Infinity,minZ=Infinity,maxX=-Infinity,maxY=-Infinity,maxZ=-Infinity;
@@ -152,7 +211,7 @@
       this.needsRender=true;
     }
 
-    top() { this.pitch=0.035; this.yaw=-Math.PI/2; this.fit(); this.distance*=1.1; this.needsRender=true; }
+    top() { this.pitch=1.535; this.yaw=-Math.PI/2; this.fit(); this.distance*=1.1; this.needsRender=true; }
 
     _matrix() {
       const eye=[this.target[0]+this.distance*Math.cos(this.pitch)*Math.cos(this.yaw),this.target[1]+this.distance*Math.cos(this.pitch)*Math.sin(this.yaw),this.target[2]+this.distance*Math.sin(this.pitch)];
@@ -161,21 +220,36 @@
     }
 
     _drawLines(mvp) {
-      const gl=this.gl,p=this.lineProgram; gl.useProgram(p); gl.uniformMatrix4fv(gl.getUniformLocation(p,"uMvp"),false,mvp);
-      const loc=gl.getAttribLocation(p,"aPosition"); gl.enableVertexAttribArray(loc); gl.bindBuffer(gl.ARRAY_BUFFER,this.gridBuffer); gl.vertexAttribPointer(loc,3,gl.FLOAT,false,0,0); gl.uniform4f(gl.getUniformLocation(p,"uColor"),.19,.37,.36,.24); gl.drawArrays(gl.LINES,0,this.gridCount);
+      const gl=this.gl,p=this.lineProgram,loc=this.lineLocations.position; gl.useProgram(p); gl.uniformMatrix4fv(this.lineLocations.mvp,false,mvp);
+      gl.enableVertexAttribArray(loc); gl.bindBuffer(gl.ARRAY_BUFFER,this.gridBuffer); gl.vertexAttribPointer(loc,3,gl.FLOAT,false,0,0); gl.uniform4f(this.lineLocations.color,.19,.37,.36,.24); gl.drawArrays(gl.LINES,0,this.gridCount);
       gl.bindBuffer(gl.ARRAY_BUFFER,this.axisBuffer); gl.vertexAttribPointer(loc,3,gl.FLOAT,false,0,0);
-      const color=gl.getUniformLocation(p,"uColor"); gl.uniform4f(color,1,.25,.22,.75); gl.drawArrays(gl.LINES,0,2); gl.uniform4f(color,.25,1,.55,.75); gl.drawArrays(gl.LINES,2,2); gl.uniform4f(color,.25,.55,1,.75); gl.drawArrays(gl.LINES,4,2);
+      const color=this.lineLocations.color; gl.uniform4f(color,1,.25,.22,.75); gl.drawArrays(gl.LINES,0,2); gl.uniform4f(color,.25,1,.55,.75); gl.drawArrays(gl.LINES,2,2); gl.uniform4f(color,.25,.55,1,.75); gl.drawArrays(gl.LINES,4,2);
     }
 
     _drawPoints(mvp) {
       if (!this.points.length) return;
-      const gl=this.gl,p=this.pointProgram; gl.useProgram(p); gl.uniformMatrix4fv(gl.getUniformLocation(p,"uMvp"),false,mvp);
-      gl.uniform1f(gl.getUniformLocation(p,"uPointSize"),Math.max(1.5,Math.min(4,window.devicePixelRatio*1.8)));
-      const min=this.bounds?this.bounds.minZ:0,max=this.bounds?this.bounds.maxZ:1; gl.uniform2f(gl.getUniformLocation(p,"uHeightRange"),min,max);
-      const loc=gl.getAttribLocation(p,"aPosition"); gl.enableVertexAttribArray(loc); gl.bindBuffer(gl.ARRAY_BUFFER,this.pointBuffer); gl.vertexAttribPointer(loc,3,gl.FLOAT,false,0,0); gl.drawArrays(gl.POINTS,0,this.points.length/3);
+      const gl=this.gl,p=this.pointProgram,loc=this.pointLocations.position; gl.useProgram(p); gl.uniformMatrix4fv(this.pointLocations.mvp,false,mvp);
+      gl.uniform1f(this.pointLocations.size,Math.max(1.5,Math.min(4,window.devicePixelRatio*1.8)));
+      const min=this.bounds?this.bounds.minZ:0,max=this.bounds?this.bounds.maxZ:1; gl.uniform2f(this.pointLocations.height,min,max);
+      const total=this.points.length/3;
+      // Navigation favors latency over density.  WebGL's attribute stride lets
+      // us sample the existing GPU buffer without allocating another cloud.
+      const step=this.drag?Math.min(20,Math.max(1,Math.ceil(total/90000))):1;
+      const count=Math.floor((total-1)/step)+1;
+      gl.enableVertexAttribArray(loc); gl.bindBuffer(gl.ARRAY_BUFFER,this.pointBuffer);
+      gl.vertexAttribPointer(loc,3,gl.FLOAT,false,step===1?0:step*12,0);
+      gl.drawArrays(gl.POINTS,0,count);
     }
 
-    _loop() { if (this.needsRender) { this.needsRender=false; this.gl.clear(this.gl.COLOR_BUFFER_BIT|this.gl.DEPTH_BUFFER_BIT); const m=this._matrix(); this._drawLines(m); this._drawPoints(m); } requestAnimationFrame(()=>this._loop()); }
+    _loop() {
+      if (!this.drag && this.pendingPoints) this._commitPendingPoints();
+      if (this.needsRender) {
+        this.needsRender=false;
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT|this.gl.DEPTH_BUFFER_BIT);
+        const m=this._matrix(); this._drawLines(m); this._drawPoints(m);
+      }
+      requestAnimationFrame(()=>this._loop());
+    }
   }
 
   window.PointCloudViewer = PointCloudViewer;

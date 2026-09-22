@@ -12,6 +12,13 @@
 - 可观测性与界面：`backend/mapping_server.py` 的预览响应新增 `X-Map-Ground-Local-Cells`、`X-Map-Ground-Local-Anchors` 和局部偏移最小/最大值响应头；`web/app.js` 在预览统计中显示实际参与校正的“局部地面 N 格”，`web/index.html` 与 `README.md` 同步说明整体倾斜 + 局部缓变地面的两阶段语义和保护低矮障碍的边界。`tests/test_mapping_core.py` 新增 ±16 cm 缓慢弯曲地面与 10 cm 平台回归，`tests/test_mapping_server.py` / `tests/app_status_harness.mjs` 覆盖新统计链路。
 - 实测与验证：对现有 `data/pcd/lab_map.pcd`（1,435,901 点）只读运行默认配置，耗时约 0.7 秒；局部模型采用 892 个可信网格，切片点由旧算法的 404,964 降至 387,393，占据格由 57,145 降至 50,345，中部大块地面残留明显消退。`python3 -m compileall -q backend tests`、`python3 -m unittest discover -s tests -v`（51 项）、三个前端 `node --check`、`node tests/point_cloud_viewer_harness.mjs`、`node tests/editor_pointer_harness.mjs`、`node tests/app_status_harness.mjs`、`bash -n run.sh` 全通过。另在隔离端口 18796 启动当前后端：`/api/status` 正常返回 `IDLE`，`/api/cloud` 验证为 `MAP1` + 点数 0；真实 `POST /api/pcd/map-preview` 对 `lab_map` 返回 HTTP 200、合法 788×308 PGM 以及 892 个局部地面网格等新响应头，随后精确停止测试进程。项目默认 8765 端口当时没有运行中的服务。未连接真实雷达、未启动受管建图链，也未用真实浏览器对现场地图进行人工视觉验收。
 
+## 2026-09-22 — 实时与文件点云拖动优先保证相机帧
+
+- 根因与交互：`web/point-cloud-viewer.js` 原先在每个实时 `MAP1` 快照到达时立即遍历全部点并上传 GPU，该重工作会插入鼠标拖动的两帧之间；文件预览即使没有实时更新，拖动时每帧绘制最多 220,000 点也会在较弱 GPU 上拉低帧率。现在拖动期间保持当前 GPU 点缓冲不变，到达的多帧实时点云只保留最新一帧，松手后再统一上传；相机帧绘制时用 WebGL attribute stride 对大于 90,000 的点集做等间隔临时降采样，不分配第二份点云、不改磁盘或完整预览数据，松手立即恢复全密度。
+- 手感与修正：指针合并事件现在以最新坐标直接驱动下一个动画帧；旋转方向和按键分工对齐 RViz 2 官方 `OrbitViewController`：左键拖动旋转（`yaw -= dx×0.005`、`pitch += dy×0.005`），中键或 `Shift+左键` 平移焦点，右键向上/向下拖动放大/缩小，滚轮缩放。平移根据当前距离、视场角与画布高度在相机平面内换算；滚轮统一了像素/行/页三种 `deltaMode`；WebGL shader 的 attribute/uniform 位置改为初始化时缓存。同时修正原“俯视”将 pitch 设为接近水平的反向错误，现在是真正从 +Z 上方看向地图。`web/index.html` 的底部手势提示已同步。
+- 回归覆盖：新增 `tests/point_cloud_viewer_harness.mjs`，用真实查看器和 Canvas/WebGL 桩验证拖动中不上传新点云、两帧到达合并为最新帧、120,000 点在拖动时等间隔绘制 60,000 点、相机在下一动画帧更新、RViz 旋转方向、中键平移、右键向上拖动放大、正确俯视与滚轮归一化。`AGENTS.md` 与 `README.md` 已将它纳入无浏览器验证流程。
+- 验证：`python3 -m compileall -q backend tests`、`python3 -m unittest discover -s tests -v`（48 项）、三个前端 `node --check`、`node tests/point_cloud_viewer_harness.mjs`、`node tests/editor_pointer_harness.mjs`、`node tests/app_status_harness.mjs`、`bash -n run.sh` 与 `git diff --check` 全通过。未连接真实雷达，未启动 ROS 建图链，未使用真实浏览器/GPU 对超大 PCD 的实际帧率与手感做主观验收。
+
 ## 2026-09-22 — 本地 small_point_lio 覆盖工作区纳入版本管理
 
 - 背景：`e4f1be4` 已把受管 LIO 改为启动项目内 `ros2_ws/install/small_point_lio` 的可执行文件，`run.sh` 也会 source `ros2_ws/install/setup.bash`，但 `ros2_ws/src/small_point_lio` 与 `ros2_ws/README.md` 当时漏了 `git add`，一直处于未跟踪状态；只克隆本仓库时本地覆盖工作区缺源码，无法按 `ros2_ws/README.md` 重建。

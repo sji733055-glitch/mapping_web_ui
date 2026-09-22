@@ -267,10 +267,13 @@ ros2 service call /mapping/reset std_srvs/srv/Trigger '{}'
 cd /home/mas/mapping_web_ui
 python3 -m unittest discover -s tests -v
 node tests/editor_pointer_harness.mjs
+node tests/point_cloud_viewer_harness.mjs
 node tests/app_status_harness.mjs
 ```
 
 `tests/editor_pointer_harness.mjs` 用一个极简 DOM 桩加载真实的 `web/map-editor.js`，回放取帧的按下、平移、转向手势，因此不需要浏览器或构建工具即可回归地图编辑器的指针交互。
+
+`tests/point_cloud_viewer_harness.mjs` 用最小 Canvas/WebGL 桩驱动真实的 `web/point-cloud-viewer.js`，回归拖动时的相机跟随、交互期降采样、实时点云延后上传、俯视、平移和滚轮缩放。
 
 `tests/app_status_harness.mjs` 用 DOM、WebSocket、fetch 桩加载真实的 `web/app.js`，经 HTTP 轮询与 WebSocket 推送回放状态序列，并覆盖自助二维切片：默认参数来自 `status.map_export`、操作者改动不被轮询覆盖、PGM 预览解码与统计行、转换请求体、以及保存指令不再带 `z_max`。
 

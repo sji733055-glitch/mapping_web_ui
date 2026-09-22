@@ -234,6 +234,7 @@ python3 -m unittest discover -s tests -v
 node --check web/app.js
 node --check web/point-cloud-viewer.js
 node --check web/map-editor.js
+node tests/point_cloud_viewer_harness.mjs
 node tests/editor_pointer_harness.mjs
 node tests/app_status_harness.mjs
 bash -n run.sh
@@ -242,6 +243,10 @@ bash -n run.sh
 `tests/editor_pointer_harness.mjs` drives the real `web/map-editor.js` through a
 minimal DOM stub, so map-editor pointer interactions stay covered without a
 browser.
+
+`tests/point_cloud_viewer_harness.mjs` drives the real WebGL viewer through a
+minimal canvas/GL stub. It covers camera movement, interaction-time point
+decimation, deferred live-cloud uploads, top view, panning, and wheel zoom.
 
 `tests/app_status_harness.mjs` drives the real `web/app.js` through a minimal
 DOM, WebSocket and fetch stub, replaying the status sequence over both
