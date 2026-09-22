@@ -1,5 +1,11 @@
 # Change history
 
+## 2026-09-22 — 本地 small_point_lio 覆盖工作区纳入版本管理
+
+- 背景：`e4f1be4` 已把受管 LIO 改为启动项目内 `ros2_ws/install/small_point_lio` 的可执行文件，`run.sh` 也会 source `ros2_ws/install/setup.bash`，但 `ros2_ws/src/small_point_lio` 与 `ros2_ws/README.md` 当时漏了 `git add`，一直处于未跟踪状态；只克隆本仓库时本地覆盖工作区缺源码，无法按 `ros2_ws/README.md` 重建。
+- 变更：把 `ros2_ws/README.md` 与 `ros2_ws/src/small_point_lio`（47 个文件：C++ 源码、launch、包内示例配置、MIT 许可证、ankerl/liblzf 第三方源码与 CI 文件，约 440 KiB）提交入库，内容与上游复制时逐字节一致，本次未做任何修改。`.gitignore` 新增 `ros2_ws/.cache/`（clangd 索引缓存）、`.vscode/`（只含本机绝对路径的编辑器设置）和 `data/pcd/*.mapping-report.json`；后者是建图产出的审计报告，按“生成物只留在 `data/`”的约定不入库。构建产物 `ros2_ws/build`、`install`、`log` 的忽略规则不变。
+- 验证：`python3 -m compileall -q backend tests`、`python3 -m unittest discover -s tests`（48 项）、`node --check` 三个前端文件、`node tests/editor_pointer_harness.mjs`、`node tests/app_status_harness.mjs`、`bash -n run.sh` 与 `git diff --check` 全通过。提交前用 `git status --ignored` 与 `git add -An` 核对暂存清单，确认没有 `ros2_ws/build|install|log|.cache` 进入索引，且本次未改动任何运行时代码。未重新执行 `colcon build`，未连接真实雷达，未启动 ROS 建图链或浏览器验证。
+
 ## 2026-09-21 — 二维投影新增 ROGMap 风格的结构体素杂点滤波
 
 - 核心行为：`backend/mapping_core.py` 新增离线结构体素分类。切片点先按可配置的三维体素去重，再按 XY 列分类：同列占有至少两个 Z 体素的垂直结构保留，有任一八邻域占据列支撑的水平结构也保留，只删除没有垂直或水平支撑的孤立单体素列。分类使用唯一占据体素而非原始点数，避免近处高密度单体素被误当成结构，同时保护细墙、路沿和杆状障碍。该策略借鉴 ROGMap 投影层的体素列/八邻域思路；因最终 PCD 不含逐射线 hit/miss 时序，没有冒充完整的 `OCCUPIED / KNOWN_FREE / UNKNOWN` 概率分类。
