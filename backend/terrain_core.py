@@ -579,6 +579,7 @@ def list_editable_maps(output_root: Path) -> list[dict[str, Any]]:
                 error = str(exception)
         result.append({
             "name": safe_name,
+            "has_yaml": yaml_path.is_file(),
             "has_occupancy": yaml_path.is_file() and pgm_path.is_file(),
             "has_terrain": terrain_path.is_file(),
             "width": width,

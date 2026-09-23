@@ -61,6 +61,27 @@ check("前端只从真实轨迹 API 读取路径", SOURCE.includes("/api/traject
 check("轨迹轮询只在工作区可见时发出请求", /async function pollPlanner\(\)[\s\S]{0,400}?dom\.workspace\.hidden/.test(SOURCE));
 check("切回轨迹工作区时立即刷新一次", /trajectory-workspace-activated"[\s\S]{0,160}?pollPlanner\(\)/.test(SOURCE));
 
+// The map picker reads fields off each `/api/maps` entry. A field the backend
+// never sends is silently `undefined`, which once filtered out every map and
+// left the workspace claiming no YAML + terrain map existed on disk.
+function responseKeys(file, functionName) {
+  const source = fs.readFileSync(path.join(HERE, "..", "backend", file), "utf8");
+  const start = source.indexOf(`def ${functionName}(`);
+  if (start < 0) throw new Error(`missing ${functionName} in ${file}`);
+  const rest = source.slice(start + 1);
+  const nextDef = rest.indexOf("\ndef ");
+  const body = nextDef < 0 ? rest : rest.slice(0, nextDef);
+  return [...body.matchAll(/"([a-z_][a-z0-9_]*)":/g)].map((match) => match[1]);
+}
+const servedKeys = new Set([
+  ...responseKeys("terrain_core.py", "list_editable_maps"),
+  ...responseKeys("map_frame_core.py", "map_frame_status"),
+]);
+const readKeys = [...new Set([...SOURCE.matchAll(/entry\??\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((match) => match[1]))];
+const missingKeys = readKeys.filter((key) => !servedKeys.has(key));
+check("地图选择器读取的字段后端都提供", readKeys.length >= 4 && missingKeys.length === 0);
+if (missingKeys.length) console.log(`        后端未提供：${missingKeys.join(", ")}`);
+
 if (failures.length) {
   console.error(`${failures.length} trajectory lab harness checks failed`);
   process.exitCode = 1;

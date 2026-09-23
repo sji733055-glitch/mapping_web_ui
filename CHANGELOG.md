@@ -1,5 +1,14 @@
 # Change history
 
+## 2026-09-23 — 修复轨迹验证地图列表永远为空（`has_yaml` 字段缺失）
+
+- 症状：`data/map` 里明明存在同时具备 `<名称>.yaml` 与 `<名称>_terrain.msgpack` 的地图，但“轨迹验证”页始终显示“没有同时含 YAML 与 terrain 的地图”，整个工作区因此完全无法进入。
+- 根因：`web/trajectory-lab.js` 的 `refreshMaps()` 用 `entry.has_terrain && entry.has_yaml` 过滤 `GET /api/maps`，而 `backend/terrain_core.py` 的 `list_editable_maps()` 只返回 `has_occupancy` 与 `has_terrain`——`has_yaml` 恒为 `undefined`，过滤结果永远为空。上一版新增的 Node harness 只覆盖 `TrajectoryLabCore` 的纯函数：`trajectory-lab.js` 在缺少 `canvas.getContext` 时会提前 `return`，所以这行筛选代码从未被执行过，测试因此全绿。
+- 修正：`list_editable_maps()` 新增 `has_yaml`（= YAML 存在），前端筛选逻辑保持不变。没有改指 `has_occupancy`，因为轨迹实验室的后端守卫只要求 YAML + terrain，并不需要 PGM；`has_occupancy`（YAML + PGM）会反过来把一个可用的 terrain 地图藏起来。已核对全部前端消费方：`map-editor.js` 读的 `has_occupancy`/`has_terrain`/`has_pcd`/`has_frame_metadata`/`frame_revision`/`source_to_map`/`source_frame` 与 `app.js` 均无同类缺失，`has_yaml` 是唯一一处。
+- 回归覆盖（防的是“前端读了后端没发的字段”这一类问题）：`tests/test_terrain_core.py` 新增 `test_map_listing_separates_has_yaml_from_has_occupancy`，构造“只有 YAML + terrain、没有 PGM”的地图，断言 `has_yaml`/`has_terrain` 为真而 `has_occupancy` 为假，补上 PGM 后再变真；`tests/trajectory_lab_harness.mjs` 新增“地图选择器读取的字段后端都提供”，从 `terrain_core.py`/`map_frame_core.py` 解析后端真实返回的键集合，与前端 `entry.*` 读取逐一比对，缺键时直接打印缺失字段名。已实测：删掉后端的 `has_yaml` 后该检查立刻失败并报出 `后端未提供：has_yaml`。
+- 验证：`python3 -m compileall -q backend tests`；`python3 -m unittest discover -s tests -v`（77 项）；5 个前端 `node --check`；5 个 Node harness（`trajectory_lab_harness` 16 项）；`bash -n run.sh`；`git diff --check` 全通过。另用真实 `data/` 做端到端核对：`/api/maps` 过滤后**只剩** `lab_map_20260921_211523`（此前为 0 张），该地图成功按 `772×308 @ 0.05 m/px` 解码 terrain，并用浏览器 `cellToWorld` 的同一套数学把默认起终点栅格换算成世界坐标后，后端场景守卫返回接受。
+- 顺带实测真实启动（本轮首次真正拉起隔离子进程）：隔离 `map_server` 成功启动并加载 terrain——日志 `loaded 772x308 static terrain map at 0.050 m/px, origin=(-5.237015, -7.874179)`，节点名 `mapping.trajectory_lab.trajectory_lab_map_server`，停止时按 `SIGINT` 干净退出，前后均无残留进程；隔离 `nav_executor` 以 code 127 退出，报 `/lib/x86_64-linux-gnu/libpcl_io.so.1.14: undefined symbol: libusb_set_option`。该错误与本仓库无关：`/etc/profile:38` 与 `~/.bashrc:128` 把海康 MVS 的 `/opt/MVS/lib/64` 前置进 `LD_LIBRARY_PATH`，其 `libusb-1.0.so.0` 不含 `libusb_set_option`，遮蔽了系统 libusb；直接 `ros2 run mas2027_nav_executor mas2027_nav_executor_node` 同样 code 127，即**实车导航链在当前终端环境下同样起不来**。把 `/usr/lib/x86_64-linux-gnu` 前置后 `ldd` 解析回系统 libusb、符号错误消失。本轮**未**改动 `run.sh`、后端或导航仓库去绕过它：这属于本机环境配置问题，且隔离实验室如实复现真实规划器的失败是正确行为。**未进行真实浏览器视觉验收；修复后仍未在真实规划成功的前提下验证 MINCO 轨迹输出**。
+
 ## 2026-09-23 — 新增 terrain 全局/MINCO 轨迹验证工作区
 
 - 操作面：`web/index.html`、`web/styles.css`、`web/map-editor.js` 和新增的 `web/trajectory-lab.js` 加入第四个“轨迹验证”栏目。工作区只读导入 `data/map` 中的 MPE2 terrain `label + direction` 双通道，可在图上设置车体当前位置与目标位置，并显示**真实规划器**算出的全局搜索折线与 MINCO 轨迹。白色质点按弧长沿真实 MINCO 路径回放，可开始/暂停/重置并调整回放速度；运行中仍能用笔刷放置或擦除临时障碍，松开指针后整份障碍会送进隔离 ROGMap 并触发真实重规划。
