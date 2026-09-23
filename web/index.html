@@ -25,6 +25,7 @@
           <button class="surface-tab is-active" id="mapping-tab" type="button" aria-controls="mapping-workspace" aria-selected="true">实时建图</button>
           <button class="surface-tab" id="editor-tab" type="button" aria-controls="editor-workspace" aria-selected="false">地图编辑</button>
           <button class="surface-tab" id="rogmap-tab" type="button" aria-controls="rogmap-workspace" aria-selected="false">ROGMap 分类</button>
+          <button class="surface-tab" id="trajectory-tab" type="button" aria-controls="trajectory-workspace" aria-selected="false">轨迹验证</button>
         </nav>
         <div class="header-status">
           <span class="connection-pill is-offline" id="connection-pill">
@@ -482,6 +483,125 @@
           </section>
         </aside>
       </section>
+
+      <section class="trajectory-workspace" id="trajectory-workspace" aria-label="terrain 全局与 MINCO 轨迹验证" hidden>
+        <section class="trajectory-canvas-card">
+          <div class="editor-heading">
+            <div>
+              <p class="section-kicker">TERRAIN TRAJECTORY LAB</p>
+              <h2 id="trajectory-title">全局与 MINCO 轨迹验证</h2>
+            </div>
+            <div class="editor-heading-tools">
+              <span class="layer-badge" id="trajectory-state-badge">未加载</span>
+              <button class="tool-button" id="trajectory-zoom-out" type="button" aria-label="缩小轨迹地图">−</button>
+              <button class="tool-button" id="trajectory-zoom-in" type="button" aria-label="放大轨迹地图">＋</button>
+              <button class="tool-button" id="trajectory-fit" type="button">适应视图</button>
+            </div>
+          </div>
+          <div class="trajectory-canvas-wrap" id="trajectory-canvas-wrap">
+            <canvas id="trajectory-canvas" aria-label="terrain 全局与 MINCO 轨迹推演画布"></canvas>
+            <div class="editor-empty" id="trajectory-empty">
+              <strong>选择含 terrain 的地图</strong>
+              <span>加载 label 与 direction 后，设置起点、终点并在图上随时放置临时障碍。</span>
+            </div>
+            <div class="trajectory-legend" aria-label="轨迹图例">
+              <span><i class="global"></i>真实全局搜索</span>
+              <span><i class="minco"></i>真实 MINCO</span>
+              <span><i class="obstacle"></i>隔离 ROGMap 障碍</span>
+              <span><i class="particle"></i>轨迹回放质点</span>
+            </div>
+            <div class="trajectory-terrain-key" aria-label="terrain label 图例">
+              <span><i class="label-0"></i>0 平地</span><span><i class="label-1"></i>1 障碍</span>
+              <span><i class="label-2"></i>2 斜坡</span><span><i class="label-3"></i>3 一级台阶</span>
+              <span><i class="label-4"></i>4 二级台阶</span><span><i class="label-5"></i>5 飞坡</span>
+              <span><i class="label-6"></i>6 高台阶·仅顺向</span>
+            </div>
+          </div>
+          <div class="editor-footer">
+            <span id="trajectory-coordinate">栅格 —</span>
+            <span id="trajectory-world-coordinate">世界坐标 —</span>
+            <span id="trajectory-cell-value">terrain —</span>
+            <span class="editor-dirty" id="trajectory-replan-state">等待地图</span>
+          </div>
+        </section>
+
+        <aside class="trajectory-rail">
+          <section class="control-card trajectory-source-card">
+            <div class="compact-title-row">
+              <div><p class="section-kicker">ISOLATED REAL PLANNER</p><h2>轨迹地图</h2></div>
+              <button class="icon-button" id="trajectory-refresh-maps" type="button" aria-label="刷新 terrain 地图列表">↻</button>
+            </div>
+            <label class="field-label" for="trajectory-map-select">项目 data/map</label>
+            <select id="trajectory-map-select" class="editor-select"><option value="">正在读取地图…</option></select>
+            <button class="trajectory-load-button" id="trajectory-load" type="button" disabled>导入 terrain（只读）</button>
+            <div class="trajectory-play-actions">
+              <button id="trajectory-run" type="button" disabled>启动真实规划</button>
+              <button id="trajectory-stop" type="button" disabled>停止隔离规划器</button>
+            </div>
+            <p class="trajectory-source-note" id="trajectory-source-note">读取 data/map 中的 terrain 与 YAML，不修改地图文件。</p>
+            <p class="trajectory-readonly-note"><b>安全隔离</b>：只使用 <code>/mapping/trajectory_lab/*</code>；不发布实车 <code>/goal_pose</code>、<code>/Odometry</code>、<code>/cloud_registered</code> 或 <code>/cmd_vel</code>。</p>
+          </section>
+
+          <section class="control-card trajectory-tools-card">
+            <div class="compact-title-row"><h2>交互工具</h2><span id="trajectory-tool-label">设置车体</span></div>
+            <div class="trajectory-tools" role="group" aria-label="轨迹推演交互工具">
+              <button class="is-active" type="button" data-trajectory-tool="start">车体位置</button>
+              <button type="button" data-trajectory-tool="goal">目标位置</button>
+              <button type="button" data-trajectory-tool="obstacle">放障碍</button>
+              <button type="button" data-trajectory-tool="erase">擦除</button>
+              <button type="button" data-trajectory-tool="pan">平移</button>
+            </div>
+            <label class="range-row" for="trajectory-brush-radius">
+              <span>障碍笔刷</span>
+              <input id="trajectory-brush-radius" type="range" min="1" max="20" value="4" />
+              <output id="trajectory-brush-output">4 px</output>
+            </label>
+            <button class="text-button" id="trajectory-clear-obstacles" type="button" disabled>清空临时障碍</button>
+            <p class="trajectory-tool-note">运行中可继续画障碍，松开指针后发送到隔离 ROGMap 并触发真实重规划；绝不进入实车 ROGMap。</p>
+          </section>
+
+          <section class="control-card trajectory-playback-card">
+            <div class="compact-title-row"><h2>质点回放</h2><span id="trajectory-particle-status">待命</span></div>
+            <div class="trajectory-play-actions">
+              <button id="trajectory-play" type="button" disabled>▶ 开始</button>
+              <button id="trajectory-reset-particle" type="button" disabled>回到起点</button>
+            </div>
+            <label class="range-row" for="trajectory-playback-speed">
+              <span>回放速度</span>
+              <input id="trajectory-playback-speed" type="range" min="0.2" max="3" step="0.1" value="1" />
+              <output id="trajectory-speed-output">1.0 m/s</output>
+            </label>
+          </section>
+
+          <section class="control-card trajectory-params-card">
+            <div class="compact-title-row"><h2>真实参数 what-if</h2><span>临时进程</span></div>
+            <p class="trajectory-readonly-note"><b>不写本地参数</b>：启动时作为隔离 nav_executor 的临时 ROS 参数覆盖；不修改 planner_params.yaml、node_params.yaml 或 terrain。改变参数后点击“重新启动并规划”。</p>
+            <div class="trajectory-param-list">
+              <label><span>MINCO 软净空 safe_dist / m<output id="trajectory-safe-dist-output">0.33</output></span><input id="trajectory-safe-dist" type="range" min="0.10" max="1" step="0.01" value="0.33" /></label>
+              <label><span>硬碰撞距离 collision_dist / m<output id="trajectory-collision-dist-output">0.28</output></span><input id="trajectory-collision-dist" type="range" min="0.10" max="0.80" step="0.01" value="0.28" /></label>
+              <label><span>最大速度 / m·s⁻¹<output id="trajectory-max-velocity-output">3.0</output></span><input id="trajectory-max-velocity" type="range" min="0.1" max="6" step="0.1" value="3" /></label>
+              <label><span>最大加速度 / m·s⁻²<output id="trajectory-max-acceleration-output">4.0</output></span><input id="trajectory-max-acceleration" type="range" min="0.1" max="10" step="0.1" value="4" /></label>
+              <label><span>MINCO 时间权重<output id="trajectory-penalty-time-output">100</output></span><input id="trajectory-penalty-time" type="range" min="0" max="1000" step="10" value="100" /></label>
+              <label><span>全局 ESDF 权重<output id="trajectory-esdf-weight-output">1.0</output></span><input id="trajectory-esdf-weight" type="range" min="0" max="10" step="0.1" value="1" /></label>
+            </div>
+            <button class="text-button" id="trajectory-reset-params" type="button">恢复导航基线</button>
+          </section>
+
+          <section class="control-card trajectory-metrics-card">
+            <div class="compact-title-row"><h2>轨迹影响</h2><span id="trajectory-plan-time">—</span></div>
+            <div class="trajectory-metrics">
+              <div><span>全局折线</span><b id="trajectory-global-length">—</b></div>
+              <div><span>MINCO 轨迹</span><b id="trajectory-minco-length">—</b></div>
+              <div><span>全局 / MINCO 点数</span><b id="trajectory-path-points">—</b></div>
+              <div><span>方向限制格（值 50）</span><b id="trajectory-directional-cells">—</b></div>
+              <div><span>硬障碍格（值 100）</span><b id="trajectory-blocked-cells">—</b></div>
+              <div><span>临时障碍</span><b id="trajectory-obstacle-count">0</b></div>
+              <div><span>隔离 cmd_vel 接收</span><b id="trajectory-cmd-count">0</b></div>
+            </div>
+            <p class="trajectory-impact-note" id="trajectory-impact-note">加载 terrain 后，真实全局与 MINCO 轨迹会叠加在 label/direction 图层上；方向限制格来自执行器实际发布的 planning_constraints。</p>
+          </section>
+        </aside>
+      </section>
       </div>
 
       <footer class="statusbar">
@@ -497,5 +617,6 @@
     <script src="/app.js"></script>
     <script src="/map-editor.js"></script>
     <script src="/rogmap-projection.js"></script>
+    <script src="/trajectory-lab.js"></script>
   </body>
 </html>

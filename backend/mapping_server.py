@@ -29,7 +29,8 @@ from urllib.parse import parse_qs, urlsplit
 import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time
-from nav_msgs.msg import OccupancyGrid, Odometry
+from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import OccupancyGrid, Odometry, Path as NavPath
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -79,6 +80,16 @@ try:
         save_occupancy_editor_map,
         write_terrain_msgpack,
     )
+    from .trajectory_lab_core import (
+        LAB_NAMESPACE,
+        LAB_PARAMETERS,
+        LAB_TOPICS,
+        build_lab_commands,
+        decimate_path,
+        validate_obstacles,
+        validate_parameters,
+        validate_pose,
+    )
 except ImportError:
     from mapping_core import (
         BinDisappearanceConfig,
@@ -119,6 +130,16 @@ except ImportError:
         occupancy_to_terrain,
         save_occupancy_editor_map,
         write_terrain_msgpack,
+    )
+    from trajectory_lab_core import (
+        LAB_NAMESPACE,
+        LAB_PARAMETERS,
+        LAB_TOPICS,
+        build_lab_commands,
+        decimate_path,
+        validate_obstacles,
+        validate_parameters,
+        validate_pose,
     )
 
 
@@ -621,12 +642,39 @@ class MappingSupervisor(Node):
         )
         self._rogmap_config.validate()
 
+        # The trajectory laboratory launches a second, fully isolated copy of
+        # the project's real map server and navigation executor.  This node is
+        # the only bridge to it; no laboratory publisher targets the vehicle's
+        # /goal_pose, /Odometry, /cloud_registered or /cmd_vel topics.
+        self._trajectory_lock = threading.RLock()
+        self._trajectory_processes: dict[str, tuple[subprocess.Popen[bytes], Any]] = {}
+        self._trajectory_state = "STOPPED"
+        self._trajectory_message = "隔离规划器尚未启动"
+        self._trajectory_map_name = ""
+        self._trajectory_start = (0.0, 0.0, 0.0)
+        self._trajectory_goal = (0.0, 0.0, 0.0)
+        self._trajectory_obstacles: list[tuple[float, float]] = []
+        self._trajectory_parameters = validate_parameters({})
+        self._trajectory_global_path: list[tuple[float, float]] = []
+        self._trajectory_minco_path: list[tuple[float, float]] = []
+        self._trajectory_plan_started_at = 0.0
+        self._trajectory_global_received_at = 0.0
+        self._trajectory_minco_received_at = 0.0
+        self._trajectory_constraints = {"free": 0, "directional": 0, "blocked": 0, "unknown": 0}
+        self._trajectory_cmd = {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0, "received": 0}
+        self._trajectory_generation = 0
+        self._trajectory_last_cloud_publish = 0.0
+        self._trajectory_last_goal_publish = 0.0
+
         retained_qos = QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.status_publisher = self.create_publisher(String, "/mapping/status", retained_qos)
         self.cloud_publisher = self.create_publisher(PointCloud2, "/mapping/accumulated_cloud", retained_qos)
+        self.trajectory_odom_publisher = self.create_publisher(Odometry, LAB_TOPICS["odom"], qos_profile_sensor_data)
+        self.trajectory_goal_publisher = self.create_publisher(PoseStamped, LAB_TOPICS["goal"], 10)
+        self.trajectory_obstacle_publisher = self.create_publisher(PointCloud2, LAB_TOPICS["cloud"], qos_profile_sensor_data)
         self.create_subscription(PointCloud2, settings.cloud_topic, self._on_cloud, qos_profile_sensor_data)
         if settings.odom_topic:
             self.create_subscription(Odometry, settings.odom_topic, self._on_odom, qos_profile_sensor_data)
@@ -648,12 +696,17 @@ class MappingSupervisor(Node):
             self._on_rogmap_occupied,
             qos_profile_sensor_data,
         )
+        self.create_subscription(NavPath, LAB_TOPICS["global_plan"], self._on_trajectory_global_path, 10)
+        self.create_subscription(NavPath, LAB_TOPICS["minco_path"], self._on_trajectory_minco_path, 10)
+        self.create_subscription(OccupancyGrid, LAB_TOPICS["planning_constraints"], self._on_trajectory_constraints, 10)
+        self.create_subscription(Twist, LAB_TOPICS["cmd_vel"], self._on_trajectory_cmd, 10)
         self.create_service(Trigger, "/mapping/start", self._start_service)
         self.create_service(Trigger, "/mapping/stop_and_save", self._stop_service)
         self.create_service(Trigger, "/mapping/reset", self._reset_service)
         self.create_timer(0.5, self._publish_status)
         self.create_timer(1.0 / settings.web_publish_rate, self._publish_web_cloud)
         self.create_timer(1.0 / settings.ros_publish_rate, self._publish_ros_cloud)
+        self.create_timer(0.05, self._publish_trajectory_lab_inputs)
         self.get_logger().info(
             f"Mapping web supervisor ready: {settings.cloud_topic} -> {self.output_root}"
         )
@@ -1393,6 +1446,299 @@ class MappingSupervisor(Node):
             self._stack_transition = ""
             self._stack_message = "网页管理的建图节点已停止"
 
+    @staticmethod
+    def _trajectory_path_points(message: NavPath) -> list[tuple[float, float]]:
+        return [
+            (float(pose.pose.position.x), float(pose.pose.position.y))
+            for pose in message.poses
+            if math.isfinite(pose.pose.position.x) and math.isfinite(pose.pose.position.y)
+        ]
+
+    def _on_trajectory_global_path(self, message: NavPath) -> None:
+        with self._trajectory_lock:
+            if self._trajectory_state == "STOPPED":
+                return
+            self._trajectory_global_path = self._trajectory_path_points(message)
+            self._trajectory_global_received_at = time.monotonic()
+            if self._trajectory_global_path and self._trajectory_state != "READY":
+                self._trajectory_state = "PLANNING"
+                self._trajectory_message = "已收到真实全局搜索折线，等待 MINCO 轨迹"
+
+    def _on_trajectory_minco_path(self, message: NavPath) -> None:
+        with self._trajectory_lock:
+            if self._trajectory_state == "STOPPED":
+                return
+            self._trajectory_minco_path = self._trajectory_path_points(message)
+            self._trajectory_minco_received_at = time.monotonic()
+            if self._trajectory_minco_path:
+                self._trajectory_state = "READY"
+                self._trajectory_message = "真实全局与 MINCO 轨迹已就绪"
+
+    def _on_trajectory_constraints(self, message: OccupancyGrid) -> None:
+        values = np.asarray(message.data, dtype=np.int16)
+        with self._trajectory_lock:
+            self._trajectory_constraints = {
+                "free": int(np.count_nonzero(values == 0)),
+                "directional": int(np.count_nonzero(values == 50)),
+                "blocked": int(np.count_nonzero(values >= 100)),
+                "unknown": int(np.count_nonzero(values < 0)),
+            }
+
+    def _on_trajectory_cmd(self, message: Twist) -> None:
+        with self._trajectory_lock:
+            self._trajectory_cmd = {
+                "linear_x": float(message.linear.x),
+                "linear_y": float(message.linear.y),
+                "angular_z": float(message.angular.z),
+                "received": int(self._trajectory_cmd["received"]) + 1,
+            }
+
+    @staticmethod
+    def _trajectory_cell(editor_map: Any, pose: tuple[float, float, float]) -> tuple[int, int]:
+        metadata = editor_map.metadata
+        dx, dy = pose[0] - metadata.origin_x, pose[1] - metadata.origin_y
+        cosine, sine = math.cos(metadata.origin_yaw), math.sin(metadata.origin_yaw)
+        local_x = cosine * dx + sine * dy
+        local_y = -sine * dx + cosine * dy
+        return math.floor(local_x / metadata.resolution), math.floor(local_y / metadata.resolution)
+
+    def _validate_trajectory_scene(
+        self,
+        map_name: str,
+        start: tuple[float, float, float],
+        goal: tuple[float, float, float],
+        obstacles: list[tuple[float, float]],
+    ) -> tuple[Path, Path]:
+        name = sanitize_map_name(map_name)
+        yaml_path, _pgm_path, terrain_path = map_paths(self.output_root, name)
+        if not yaml_path.is_file():
+            raise FileNotFoundError(f"找不到地图 YAML：{name}.yaml")
+        if not terrain_path.is_file():
+            raise FileNotFoundError(f"找不到 terrain 地图：{name}_terrain.msgpack")
+        editor_map = load_terrain_editor_map(terrain_path, yaml_path=yaml_path)
+        for label, pose in (("车体位置", start), ("目标位置", goal)):
+            cell_x, cell_y = self._trajectory_cell(editor_map, pose)
+            if not (0 <= cell_x < editor_map.metadata.width and 0 <= cell_y < editor_map.metadata.height):
+                raise ValueError(f"{label}不在 terrain 地图范围内")
+            if int(editor_map.values[cell_y * editor_map.metadata.width + cell_x]) == 1:
+                raise ValueError(f"{label}落在 label 1 障碍格上")
+        for point in obstacles:
+            cell_x, cell_y = self._trajectory_cell(editor_map, (point[0], point[1], 0.0))
+            if not (0 <= cell_x < editor_map.metadata.width and 0 <= cell_y < editor_map.metadata.height):
+                raise ValueError("临时障碍不能放在 terrain 地图范围外")
+        return yaml_path, terrain_path
+
+    def _reap_trajectory_processes(self) -> None:
+        for key, (process, log_stream) in list(self._trajectory_processes.items()):
+            return_code = process.poll()
+            if return_code is None:
+                continue
+            try:
+                log_stream.close()
+            except OSError:
+                pass
+            del self._trajectory_processes[key]
+            if self._trajectory_state not in {"STOPPED", "STOPPING"}:
+                self._trajectory_state = "ERROR"
+                self._trajectory_message = f"隔离 {key} 已退出（code {return_code}），请查看运行日志"
+
+    def trajectory_status(self) -> dict[str, Any]:
+        with self._trajectory_lock:
+            self._reap_trajectory_processes()
+            return {
+                "state": self._trajectory_state,
+                "message": self._trajectory_message,
+                "isolated": True,
+                "namespace": LAB_NAMESPACE,
+                "map_name": self._trajectory_map_name,
+                "start": list(self._trajectory_start),
+                "goal": list(self._trajectory_goal),
+                "parameters": dict(self._trajectory_parameters),
+                "parameter_defaults": {name: spec.default for name, spec in LAB_PARAMETERS.items()},
+                "obstacle_count": len(self._trajectory_obstacles),
+                "global_path": decimate_path(self._trajectory_global_path),
+                "minco_path": decimate_path(self._trajectory_minco_path),
+                "global_received": self._trajectory_global_received_at > 0.0,
+                "minco_received": self._trajectory_minco_received_at > 0.0,
+                "plan_elapsed_seconds": (
+                    max(0.0, time.monotonic() - self._trajectory_plan_started_at)
+                    if self._trajectory_plan_started_at and self._trajectory_state in {"STARTING", "PLANNING"}
+                    else 0.0
+                ),
+                "constraints": dict(self._trajectory_constraints),
+                "isolated_cmd_vel": dict(self._trajectory_cmd),
+                "generation": self._trajectory_generation,
+                "managed_processes": sorted(self._trajectory_processes),
+                "log_dir": str(Path(self.settings.trajectory_lab_log_dir).expanduser().resolve()),
+            }
+
+    def start_trajectory_lab(self, payload: dict[str, Any]) -> tuple[bool, str]:
+        map_name = sanitize_map_name(str(payload.get("map_name", "")))
+        start = validate_pose(payload.get("start"), "车体位置")
+        goal = validate_pose(payload.get("goal"), "目标位置")
+        obstacles = validate_obstacles(payload.get("obstacles"))
+        parameters = validate_parameters(payload.get("parameters"))
+        yaml_path, terrain_path = self._validate_trajectory_scene(
+            map_name, start, goal, obstacles
+        )
+        config_dir = Path(self.settings.trajectory_lab_config_dir).expanduser().resolve()
+        required = [config_dir / name for name in ("planner_params.yaml", "node_params.yaml", "mpc_params.yaml")]
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(f"找不到导航配置：{', '.join(missing)}")
+        self.stop_trajectory_lab()
+        commands = build_lab_commands(
+            terrain_path=terrain_path,
+            yaml_path=yaml_path,
+            config_dir=config_dir,
+            parameters=parameters,
+        )
+        log_dir = Path(self.settings.trajectory_lab_log_dir).expanduser().resolve()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with self._trajectory_lock:
+            self._trajectory_state = "STARTING"
+            self._trajectory_message = "正在启动隔离 map_server 与真实导航执行器"
+            self._trajectory_map_name = map_name
+            self._trajectory_start = start
+            self._trajectory_goal = goal
+            self._trajectory_obstacles = obstacles
+            self._trajectory_parameters = parameters
+            self._trajectory_global_path = []
+            self._trajectory_minco_path = []
+            self._trajectory_global_received_at = 0.0
+            self._trajectory_minco_received_at = 0.0
+            self._trajectory_constraints = {"free": 0, "directional": 0, "blocked": 0, "unknown": 0}
+            self._trajectory_cmd = {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0, "received": 0}
+            self._trajectory_plan_started_at = time.monotonic()
+            self._trajectory_last_cloud_publish = 0.0
+            self._trajectory_last_goal_publish = 0.0
+            self._trajectory_generation += 1
+            try:
+                for key in ("map_server", "nav_executor"):
+                    log_stream = (log_dir / f"{key}.log").open("ab", buffering=0)
+                    process = subprocess.Popen(
+                        commands[key],
+                        stdin=subprocess.DEVNULL,
+                        stdout=log_stream,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        close_fds=True,
+                    )
+                    self._trajectory_processes[key] = (process, log_stream)
+            except Exception as error:
+                self._trajectory_state = "ERROR"
+                self._trajectory_message = f"隔离规划器启动失败：{error}"
+                self.stop_trajectory_lab()
+                raise RuntimeError(self._trajectory_message) from error
+            self._trajectory_state = "PLANNING"
+            self._trajectory_message = "隔离规划器已启动，正在等待地图、ROGMap 与真实 MINCO"
+        return True, self._trajectory_message
+
+    def update_trajectory_obstacles(self, payload: dict[str, Any]) -> tuple[bool, str]:
+        obstacles = validate_obstacles(payload.get("obstacles"))
+        with self._trajectory_lock:
+            if self._trajectory_state in {"STOPPED", "STOPPING", "ERROR"}:
+                return False, "隔离规划器未运行，请先启动"
+            self._validate_trajectory_scene(
+                self._trajectory_map_name,
+                self._trajectory_start,
+                self._trajectory_goal,
+                obstacles,
+            )
+            self._trajectory_obstacles = obstacles
+            self._trajectory_global_path = []
+            self._trajectory_minco_path = []
+            self._trajectory_global_received_at = 0.0
+            self._trajectory_minco_received_at = 0.0
+            self._trajectory_plan_started_at = time.monotonic()
+            self._trajectory_last_cloud_publish = 0.0
+            self._trajectory_last_goal_publish = 0.0
+            self._trajectory_generation += 1
+            self._trajectory_state = "PLANNING"
+            self._trajectory_message = "临时障碍已送入隔离 ROGMap，正在真实重规划"
+        return True, self._trajectory_message
+
+    def stop_trajectory_lab(self) -> tuple[bool, str]:
+        with self._trajectory_lock:
+            records = list(self._trajectory_processes.items())
+            self._trajectory_state = "STOPPING" if records else "STOPPED"
+            self._trajectory_message = "正在停止隔离规划器" if records else "隔离规划器已停止"
+        for _key, (process, _stream) in reversed(records):
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGINT)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        deadline = time.monotonic() + 4.0
+        for _key, (process, _stream) in records:
+            try:
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        with self._trajectory_lock:
+            for _key, (process, stream) in list(self._trajectory_processes.items()):
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+            self._trajectory_processes.clear()
+            self._trajectory_state = "STOPPED"
+            self._trajectory_message = "隔离规划器已停止；未向实车话题发布任何消息"
+        return True, self._trajectory_message
+
+    def _publish_trajectory_lab_inputs(self) -> None:
+        with self._trajectory_lock:
+            self._reap_trajectory_processes()
+            if self._trajectory_state not in {"STARTING", "PLANNING", "READY"}:
+                return
+            start = self._trajectory_start
+            goal = self._trajectory_goal
+            obstacles = list(self._trajectory_obstacles)
+            now = time.monotonic()
+        stamp = self.get_clock().now().to_msg()
+        odometry = Odometry()
+        odometry.header = Header(stamp=stamp, frame_id="map")
+        odometry.child_frame_id = "trajectory_lab_base_link"
+        odometry.pose.pose.position.x = start[0]
+        odometry.pose.pose.position.y = start[1]
+        odometry.pose.pose.orientation.z = math.sin(start[2] * 0.5)
+        odometry.pose.pose.orientation.w = math.cos(start[2] * 0.5)
+        self.trajectory_odom_publisher.publish(odometry)
+        if now - self._trajectory_last_cloud_publish >= 0.2:
+            # Vertical samples behave like a small real obstacle column.  A
+            # high, out-of-map sentinel keeps ROGMap fresh when the scene is
+            # empty without creating a traversability obstacle.
+            points = [
+                (x, y, z)
+                for x, y in obstacles
+                for z in (0.05, 0.20, 0.35, 0.50, 0.65, 0.80, 0.95, 1.10)
+            ]
+            if not points:
+                points = [(start[0], start[1], 10.0)]
+            cloud = point_cloud2.create_cloud_xyz32(Header(stamp=stamp, frame_id="map"), points)
+            self.trajectory_obstacle_publisher.publish(cloud)
+            self._trajectory_last_cloud_publish = now
+        if now - self._trajectory_last_goal_publish >= 0.5:
+            target = PoseStamped()
+            target.header = Header(stamp=stamp, frame_id="map")
+            target.pose.position.x = goal[0]
+            target.pose.position.y = goal[1]
+            target.pose.orientation.z = math.sin(goal[2] * 0.5)
+            target.pose.orientation.w = math.cos(goal[2] * 0.5)
+            self.trajectory_goal_publisher.publish(target)
+            self._trajectory_last_goal_publish = now
+
     def _publish_status(self) -> None:
         status = self.status()
         encoded = json.dumps(status, ensure_ascii=False, separators=(",", ":"))
@@ -1963,6 +2309,9 @@ class RequestHandler(SimpleHTTPRequestHandler):
         if request_path == "/api/status":
             self._send_json(HTTPStatus.OK, self.server.controller.status())
             return
+        if request_path == "/api/trajectory":
+            self._send_json(HTTPStatus.OK, self.server.controller.trajectory_status())
+            return
         if request_path == "/api/maps":
             try:
                 self._send_json(
@@ -2048,6 +2397,24 @@ class RequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         request_path = parsed.path
+        if request_path in {"/api/trajectory/start", "/api/trajectory/obstacles", "/api/trajectory/stop"}:
+            try:
+                payload = self._read_json_body(2 * 1024 * 1024)
+                if request_path.endswith("/start"):
+                    ok, message = self.server.controller.start_trajectory_lab(payload)
+                elif request_path.endswith("/obstacles"):
+                    ok, message = self.server.controller.update_trajectory_obstacles(payload)
+                else:
+                    ok, message = self.server.controller.stop_trajectory_lab()
+                self._send_json(
+                    HTTPStatus.OK if ok else HTTPStatus.CONFLICT,
+                    {"ok": ok, "message": message, "trajectory": self.server.controller.trajectory_status()},
+                )
+            except FileNotFoundError as error:
+                self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "message": str(error)})
+            except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as error:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "message": str(error)})
+            return
         if request_path == "/api/pcd/convert":
             try:
                 payload = self._read_json_body()
@@ -2198,8 +2565,8 @@ class RequestHandler(SimpleHTTPRequestHandler):
         """Keep only the slice parameters the offline conversion understands."""
         return {key: payload[key] for key in EXPORT_OVERRIDE_KEYS if key in payload}
 
-    def _read_json_body(self) -> dict[str, Any]:
-        payload = json.loads(self._read_body(64 * 1024) or b"{}")
+    def _read_json_body(self, maximum: int = 64 * 1024) -> dict[str, Any]:
+        payload = json.loads(self._read_body(maximum) or b"{}")
         if not isinstance(payload, dict):
             raise ValueError("JSON 请求体必须是对象")
         return payload
@@ -2328,6 +2695,14 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default="/home/mas/mas_nav_2027_native/src/mas2027_nav_bringup/config/small_point_lio_params.yaml",
     )
     parser.add_argument("--process-log-dir", default=str(project_root / ".ros" / "managed"))
+    parser.add_argument(
+        "--trajectory-lab-log-dir",
+        default=str(project_root / ".ros" / "trajectory_lab"),
+    )
+    parser.add_argument(
+        "--trajectory-lab-config-dir",
+        default="/home/mas/mas_nav_2027_native/src/mas2027_nav_executor/config",
+    )
     parser.add_argument(
         "--local-lio-source",
         default=str(project_root / "ros2_ws" / "src" / "small_point_lio"),
@@ -2524,6 +2899,7 @@ def main() -> int:
     finally:
         node.close_dynamic_worker()
         node.close_history_recorder()
+        node.stop_trajectory_lab()
         node.stop_managed_stack()
         server.shutdown()
         server.server_close()

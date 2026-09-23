@@ -41,6 +41,18 @@ Keep the implementation dependency-light and preserve these boundaries:
   - binary PCD generation;
   - height slicing, block-min preview pooling and PGM/YAML occupancy-map
     generation.
+- `backend/terrain_core.py`
+  - ROS-independent occupancy/terrain editor protocol (MPE2, PGM, YAML);
+  - MessagePack `terrain`/`direction` channels the navigation `map_server`
+    reads.
+- `backend/trajectory_lab_core.py`
+  - ROS-independent validation and command construction for the isolated
+    trajectory laboratory;
+  - owns the `/mapping/trajectory_lab` topic namespace and the parameter
+    whitelist. Keep it importable without ROS so the isolation rules stay
+    unit-testable.
+- `backend/map_frame_core.py`, `backend/rogmap_debug.py`
+  - ROS-independent map-frame alignment and ROGMap projection diagnostics.
 - `web/index.html`
   - semantic structure of the single-page operator console.
 - `web/styles.css`
@@ -49,8 +61,13 @@ Keep the implementation dependency-light and preserve these boundaries:
   - backend connection, commands, status rendering, and transport fallback.
 - `web/point-cloud-viewer.js`
   - dependency-free WebGL point-cloud rendering and camera interaction.
+- `web/map-editor.js`, `web/rogmap-projection.js`, `web/trajectory-lab.js`
+  - the map editor, the ROGMap classification workspace and the trajectory
+    laboratory surface. Each must stay loadable by the Node harnesses without
+    a browser.
 - `tests/`
-  - ROS-independent unit tests and the optional synthetic ROS data source.
+  - ROS-independent unit tests, the Node front-end harnesses, and the optional
+    synthetic ROS data source.
 
 Do not introduce rosbridge, a CDN, or a JavaScript build tool unless a new
 requirement clearly needs one. The current site is intentionally served as
@@ -115,6 +132,33 @@ bytes 8..    tightly packed little-endian float32 XYZ triples
 ```
 
 Keep WebSocket and `GET /api/cloud` payloads compatible with this format.
+
+### Isolated trajectory laboratory
+
+The trajectory workspace launches a **second**, fully remapped copy of the real
+`map_server` and `mas2027_nav_executor` as backend-managed children. It must
+never touch the vehicle's topics:
+
+```text
+Namespace  /mapping/trajectory_lab/*     (every lab topic, see LAB_TOPICS)
+Publish    .../odometry                  nav_msgs/msg/Odometry
+Publish    .../goal                      geometry_msgs/msg/PoseStamped
+Publish    .../obstacles                 sensor_msgs/msg/PointCloud2
+Subscribe  .../global_plan               nav_msgs/msg/Path
+Subscribe  .../minco_path                nav_msgs/msg/Path
+Subscribe  .../planning_constraints      nav_msgs/msg/OccupancyGrid
+Subscribe  .../cmd_vel                   geometry_msgs/msg/Twist (observation only)
+```
+
+The vehicle's `/goal_pose`, `/Odometry`, `/cloud_registered` and `/cmd_vel` must
+stay unused by the laboratory. `backend/trajectory_lab_core.py` owns the topic
+map and the parameter whitelist; when changing them, re-check the parameter
+prefixes in the navigation sources (ROGMap loads under `planner.rog_map`) so an
+override can never be silently dropped and fall back to a vehicle topic.
+
+Operator parameter sliders are ephemeral `-p` overrides on the isolated child.
+They must never be written to `planner_params.yaml`, `node_params.yaml` or any
+terrain/YAML file.
 
 ## Mapping-session semantics
 
@@ -191,6 +235,16 @@ Changing the mapping-node set or launch order requires checking the upstream
 navigation parameters and TF requirements first. Small Point-LIO needs the
 `base_link -> lidar_link` transform from `robot_state_publisher`.
 
+The isolated trajectory laboratory follows the same rules with its own logs:
+
+- it may only ever start its own `map_server` + `nav_executor` pair, and must
+  stop an existing pair before starting a new one;
+- stopping signals only the exact process groups it created, escalating
+  `SIGINT` → `SIGTERM` → `SIGKILL`, and never matches on process name;
+- the backend stops the laboratory on exit, and a child that exits on its own
+  is surfaced as `ERROR` in status;
+- logs stay under `.ros/trajectory_lab/`.
+
 ## Performance and data integrity
 
 - Keep point ingestion vectorized with NumPy; avoid per-point Python work before
@@ -234,9 +288,13 @@ python3 -m unittest discover -s tests -v
 node --check web/app.js
 node --check web/point-cloud-viewer.js
 node --check web/map-editor.js
+node --check web/rogmap-projection.js
+node --check web/trajectory-lab.js
 node tests/point_cloud_viewer_harness.mjs
 node tests/editor_pointer_harness.mjs
 node tests/app_status_harness.mjs
+node tests/rogmap_projection_harness.mjs
+node tests/trajectory_lab_harness.mjs
 bash -n run.sh
 ```
 
@@ -254,6 +312,16 @@ transports, so console state rendering stays covered without a browser. It also
 covers the self-service 2-D slice flow: defaults coming from `status.map_export`
 without clobbering operator edits, PGM (P5) preview decoding and statistics, the
 conversion request body, and a save command that no longer carries `z_max`.
+
+`tests/trajectory_lab_harness.mjs` drives the real `web/trajectory-lab.js`
+through a minimal DOM stub. Only the exported `TrajectoryLabCore` helpers run,
+so keep pure protocol/geometry/limit rules there and keep the DOM wiring behind
+the `dom.canvas` guard.
+
+`tests/test_trajectory_lab_server.py` covers the isolated-laboratory backend
+without ROS: the scene guard, the process-group shutdown behaviour and the HTTP
+status mapping. Extend it whenever the laboratory gains an endpoint or a
+child process.
 
 For backend or transport changes, also verify:
 

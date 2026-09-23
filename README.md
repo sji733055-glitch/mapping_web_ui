@@ -15,6 +15,7 @@
 - 可直接在二维图上点选新 `map` 原点并拖出 `map +X` 方向，成组变换完整 PCD、PGM/YAML 和已有 terrain，为后续重定位发布 `map→odom` TF 固定统一的地图基准；
 - 把 PGM/YAML 一键转换为 HW `map_server` 使用的 terrain msgpack，再标注平地、障碍、斜坡、各级台阶、飞坡及其方向；
 - 在“ROGMap 分类”工作区直接查看 `projection_layer` 四分类，点选桌子所在格后查看 `height_delta`、占据高度、占据层数与竖直占据率，并在浏览器中 what-if 试调 surface/wall/tunnel 阈值；
+- 在“轨迹验证”工作区只读导入已有 terrain，用一份完全隔离的真实 `map_server` + `nav_executor` 复现全局折线与 MINCO 轨迹，并在质点运行中放置临时障碍观察真实重规划；
 - 同时发布 `/mapping/accumulated_cloud` 与 `/mapping/status`，仍可在 RViz/Foxglove 中观察；
 - 提供 `/mapping/start`、`/mapping/stop_and_save`、`/mapping/reset` 三个 `std_srvs/srv/Trigger` 服务；
 - 输出文件已存在时自动在新文件名后加时间戳，不覆盖旧地图。
@@ -84,6 +85,28 @@ robot_state_publisher → mid360_driver → small_point_lio
 右侧 6 个阈值仅用于浏览器 what-if 重上色；非法关系（例如 `surface_max ≥ tunnel_min` 或 `tunnel_ratio_max ≥ wall_ratio_min`）会当场拦截。后端默认基线对齐当前 `planner_params.yaml`，也可用 `--rogmap-*-...` 启动参数覆盖。真正调参仍要修改 `planner.rog_map.projection.*` 并重启 `nav_executor`：ROGMap 当前没有将这组参数热更新到分类器的回调。
 
 二进制诊断接口为 `GET /api/rogmap/projection`，返回固定步长的 `ROG1` 格网；它和页面轮询都走同源 HTTP，因此 VS Code Remote SSH 不转发 WebSocket 时仍可用。
+
+## terrain 轨迹验证
+
+页头“轨迹验证”不是浏览器内的近似推演，而是一次**真实规划器的隔离复现**：后端把项目自己的 `map_server` 与 `mas2027_nav_executor` 作为受管子进程再启动一份，全部话题改到 `/mapping/trajectory_lab/*` 命名空间，页面显示的是这两个真实节点算出来的全局折线与 MINCO 轨迹。使用流程是：
+
+1. 选择 `data/map` 中同时具备 `<名称>.yaml` 与 `<名称>_terrain.msgpack` 的地图，点“导入 terrain（只读）”。
+2. 选“车体位置”并在图上点击当前位置，再选“目标位置”点击目标。
+3. 点“启动真实规划”：后端先校验场景，再拉起隔离 `map_server` 与隔离 `nav_executor`，并向隔离命名空间发布车体位姿、目标与障碍点云。
+4. 白色质点按回放速度沿真实 MINCO 轨迹运行。运行中可切换“放障碍”笔刷；松开指针后整份临时障碍会送进隔离 ROGMap 并触发真实重规划。
+
+隔离边界（页面上有同样的说明）：
+
+- 该工作区只使用 `/mapping/trajectory_lab/*`，不订阅也不发布实车的 `/goal_pose`、`/Odometry`、`/cloud_registered` 或 `/cmd_vel`；
+- 隔离执行器的 `cmd_vel`、`/opt_path`、cost/direction 地图、planning constraints 与可视化话题全部被重映射进该命名空间；
+- 车体位姿、目标与 brush 障碍只发布到隔离话题，绝不进入实车 ROGMap；
+- 右侧 6 个滑块（`safe_dist`、`collision_dist`、`max_velocity`、`max_acceleration`、`penalty_weight_time`、`esdf_weight`）作为**临时 ROS 参数覆盖**传给隔离执行器，不写 `planner_params.yaml`、`node_params.yaml` 或 terrain；改参数后点“重新启动并规划”生效。
+
+场景守卫在启动前拒绝：地图名路径穿越、缺少 `<名称>.yaml` 或 `<名称>_terrain.msgpack`、车体或目标落在 `label 1` 硬障碍格上或越出地图范围、临时障碍放在地图外。临时障碍上限为 20000 个格（与后端 `MAX_LAB_OBSTACLES` 一致），浏览器达到上限时停止新增并提示。
+
+规划器状态机为 `STOPPED → STARTING → PLANNING → READY`，任一受管子进程意外退出即转为 `ERROR`。停止时后端只对本项目启动的子进程组依次发 `SIGINT`、`SIGTERM`、`SIGKILL`，不使用任何按名字的批量终止；后端退出时同样会停掉隔离规划器。两个子进程日志分别写在 `.ros/trajectory_lab/map_server.log` 与 `.ros/trajectory_lab/nav_executor.log`。
+
+依赖外部导航工作区：默认从 `/home/mas/mas_nav_2027_native/src/mas2027_nav_executor/config` 读取 `planner_params.yaml`、`node_params.yaml`、`mpc_params.yaml`（`--trajectory-lab-config-dir` 可改），日志目录用 `--trajectory-lab-log-dir` 可改。相关接口为 `GET /api/trajectory` 与 `POST /api/trajectory/start|obstacles|stop`。
 
 ## 本地 Small Point-LIO 源码
 
@@ -294,6 +317,7 @@ python3 -m unittest discover -s tests -v
 node tests/editor_pointer_harness.mjs
 node tests/point_cloud_viewer_harness.mjs
 node tests/app_status_harness.mjs
+node tests/trajectory_lab_harness.mjs
 ```
 
 `tests/editor_pointer_harness.mjs` 用一个极简 DOM 桩加载真实的 `web/map-editor.js`，回放取帧的按下、平移、转向手势，因此不需要浏览器或构建工具即可回归地图编辑器的指针交互。
@@ -301,6 +325,8 @@ node tests/app_status_harness.mjs
 `tests/point_cloud_viewer_harness.mjs` 用最小 Canvas/WebGL 桩驱动真实的 `web/point-cloud-viewer.js`，回归拖动时的相机跟随、交互期降采样、实时点云延后上传、俯视、平移和滚轮缩放。
 
 `tests/app_status_harness.mjs` 用 DOM、WebSocket、fetch 桩加载真实的 `web/app.js`，经 HTTP 轮询与 WebSocket 推送回放状态序列，并覆盖自助二维切片：默认参数来自 `status.map_export`、操作者改动不被轮询覆盖、PGM 预览解码与统计行、转换请求体、以及保存指令不再带 `z_max`。
+
+`tests/trajectory_lab_harness.mjs` 直接加载真实的 `web/trajectory-lab.js`，覆盖 MPE2 双通道解码、旋转地图的栅格/世界坐标可逆、真实规划请求体、路径弧长回放，以及临时障碍上限与后端 `MAX_LAB_OBSTACLES` 的一致性。
 
 暂时没有连接雷达时，可以在控制台点击“开始建图”后，用合成房间点云检查完整链路：
 
