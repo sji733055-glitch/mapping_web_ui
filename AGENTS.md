@@ -95,6 +95,17 @@ http://127.0.0.1:8765
 - place ROS logs under this project instead of relying on `~/.ros`;
 - start the Python backend without requiring a colcon build.
 
+`run.sh` also keeps `/usr/lib/x86_64-linux-gnu` at the head of
+`LD_LIBRARY_PATH` when the Hikvision MVS SDK is installed. MVS ships an older
+`libusb-1.0.so.0` that lacks `libusb_set_option`, and the shell profiles prepend
+it, which makes every process loading the system `libpcl_io` die with
+`undefined symbol: libusb_set_option` — the managed mapping chain and the
+isolated trajectory laboratory included. Because `LD_LIBRARY_PATH` is searched
+entirely ahead of the `ld.so` cache, appending MVS is not enough; the system
+directory must come first. Keep this fix idempotent, a no-op where MVS is
+absent, and limited to this script's own process tree, and do not "fix" it by
+deleting the vendor library.
+
 The backend must remain usable through VS Code Remote SSH. Preserve both
 transport paths:
 

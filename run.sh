@@ -70,6 +70,23 @@ if [[ -f "${LOCAL_ROS_WORKSPACE}/install/setup.bash" ]]; then
 fi
 set -u
 
+# 海康 MVS 自带一份较旧的 libusb-1.0.so.0（不含 libusb_set_option），而
+# /etc/profile 与 ~/.bashrc 会把 /opt/MVS/lib/64 前置进 LD_LIBRARY_PATH。任何加载
+# 系统 libpcl_io 的进程（受管建图链、隔离轨迹实验室的 nav_executor）都会以
+# `undefined symbol: libusb_set_option` 退出。LD_LIBRARY_PATH 是整体先于 ld.so
+# 缓存搜索的，所以把 MVS 改成追加也没用，必须把系统目录显式排在它前面。
+# 只影响本脚本启动的后端及其受管子进程；单独启动的 MVS 客户端不受影响。
+# 系统 libusb 是 MVS 那份的严格超集（多出 libusb_set_option / libusb_init_context
+# 等标准 API），因此 MVS 的 USB3 传输层改用它仍可正常加载与枚举设备。
+SYSTEM_LIB_DIR="/usr/lib/x86_64-linux-gnu"
+MVS_LIBUSB="/opt/MVS/lib/64/libusb-1.0.so.0"
+if [[ -d "${SYSTEM_LIB_DIR}" && -e "${MVS_LIBUSB}" ]]; then
+  if [[ "${LD_LIBRARY_PATH:-}" != "${SYSTEM_LIB_DIR}" && "${LD_LIBRARY_PATH:-}" != "${SYSTEM_LIB_DIR}:"* ]]; then
+    export LD_LIBRARY_PATH="${SYSTEM_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    echo "已把 ${SYSTEM_LIB_DIR} 置于 LD_LIBRARY_PATH 首位，避免海康 MVS 的旧 libusb 遮蔽系统 libusb。" >&2
+  fi
+fi
+
 mkdir -p "${PROJECT_ROOT}/.ros/log" "${PROJECT_ROOT}/data/pcd" "${PROJECT_ROOT}/data/map"
 export ROS_LOG_DIR="${PROJECT_ROOT}/.ros/log"
 export PYTHONUNBUFFERED=1

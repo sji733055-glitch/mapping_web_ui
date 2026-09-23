@@ -108,6 +108,20 @@ robot_state_publisher → mid360_driver → small_point_lio
 
 依赖外部导航工作区：默认从 `/home/mas/mas_nav_2027_native/src/mas2027_nav_executor/config` 读取 `planner_params.yaml`、`node_params.yaml`、`mpc_params.yaml`（`--trajectory-lab-config-dir` 可改），日志目录用 `--trajectory-lab-log-dir` 可改。相关接口为 `GET /api/trajectory` 与 `POST /api/trajectory/start|obstacles|stop`。
 
+### 海康 MVS 动态库冲突（`run.sh` 已处理）
+
+装了海康 MVS 的机器上，`/etc/profile` 与 `~/.bashrc` 会把 `/opt/MVS/lib/64:/opt/MVS/lib/32` 前置进 `LD_LIBRARY_PATH`。MVS 自带的 `libusb-1.0.so.0` 比系统版旧、不含 `libusb_set_option`，会遮蔽系统 libusb，使任何加载系统 `libpcl_io` 的进程直接以 `undefined symbol: libusb_set_option` 退出——受管建图链、隔离轨迹实验室的 `nav_executor`，以及从同一 shell 启动的实车导航链都会中招。
+
+`LD_LIBRARY_PATH` 是**整体先于** `ld.so` 缓存搜索的，所以只在末尾追加 MVS 没有用，必须把系统目录显式排在它前面。`run.sh` 在 source 完 ROS 工作区后会检测并处理：若 MVS 那份 libusb 存在且系统目录不在首位，就把 `/usr/lib/x86_64-linux-gnu` 置为 `LD_LIBRARY_PATH` 首项并打印一行说明。该处理幂等，未装 MVS 的机器上完全空转，且只影响本脚本启动的后端与其受管子进程，单独运行的 MVS 客户端不受影响。
+
+换用系统 libusb 是安全的：两者 soname 相同，系统版是 MVS 那份的**严格超集**（97 个 API 对 83 个，多出的都是 libusb 1.0.23+ 的标准 API，无厂商私有符号），且只有 `libMvUsb3vTL.so`（USB3 传输层）链接 libusb，GigE 那套 `libMVGigEVisionSDK.so` 根本不加载它。已实测 MVS SDK 换库后仍能正常加载与枚举设备；若 USB3 取流出现异常，删掉 `run.sh` 里那段判断即可回到原状。
+
+从普通终端（而非 `run.sh`）启动实车导航链时不受此处理影响，仍需自行把系统目录排在 MVS 前面，例如：
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+```
+
 ## 本地 Small Point-LIO 源码
 
 项目内置了从导航工作区原样复制的 Small Point-LIO 包：

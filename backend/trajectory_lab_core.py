@@ -111,10 +111,25 @@ def validate_obstacles(raw: Any) -> list[tuple[float, float]]:
     return result
 
 
+def _format_parameter(value: float) -> str:
+    """Format a double so ROS 2 reads it back as a double, not an integer.
+
+    ``f"{1.0:g}"`` renders as ``"1"``, and ``-p name:=1`` makes ROS 2 reject the
+    override for a parameter declared as double ("is of type {integer}"), which
+    aborts the isolated planner before it can plan anything.  Four of the six
+    whitelisted defaults are whole numbers, so every value keeps an explicit
+    decimal point or exponent.
+    """
+    text = f"{value:g}"
+    if not any(character in text for character in ".eE"):
+        text += ".0"
+    return text
+
+
 def _parameter_arguments(parameters: dict[str, float]) -> list[str]:
     arguments: list[str] = []
     for name, value in parameters.items():
-        arguments.extend(["-p", f"{LAB_PARAMETERS[name].parameter}:={value:g}"])
+        arguments.extend(["-p", f"{LAB_PARAMETERS[name].parameter}:={_format_parameter(value)}"])
     return arguments
 
 
