@@ -3,10 +3,10 @@
 
   const MAGIC = "MPE2";
   const HEADER_SIZE = 48;
-  const LABEL_NAMES = ["平地", "障碍物", "斜坡", "一级台阶", "二级台阶", "飞坡", "高台阶"];
+  const LABEL_NAMES = ["平地", "障碍物", null, null, null, "上坡", "隧道", "起伏路段"];
   const LABEL_COLORS = [
-    [27, 55, 48], [112, 42, 42], [104, 71, 29], [100, 94, 35],
-    [82, 43, 91], [24, 79, 86], [24, 91, 98],
+    [27, 55, 48], [112, 42, 42], null, null, null,
+    [104, 71, 29], [82, 43, 91], [24, 79, 86],
   ];
   const PARAMETER_DEFAULTS = Object.freeze({
     safe_dist: 0.33,
@@ -38,7 +38,7 @@
     const layer = view.getUint8(4);
     const width = view.getUint32(8, true), height = view.getUint32(12, true), count = width * height;
     if (layer !== 1 || !width || !height || !Number.isSafeInteger(count) || count > 16000000) throw new Error("terrain 图层或尺寸无效");
-    if (buffer.byteLength !== HEADER_SIZE + count * 2) throw new Error("terrain label/direction 通道长度无效");
+    if (buffer.byteLength !== HEADER_SIZE + count) throw new Error("terrain label 通道长度无效");
     const frame = {
       width, height,
       resolution: view.getFloat64(16, true),
@@ -46,10 +46,9 @@
       originY: view.getFloat64(32, true),
       originYaw: view.getFloat64(40, true),
       labels: new Uint8Array(buffer.slice(HEADER_SIZE, HEADER_SIZE + count)),
-      directions: new Uint8Array(buffer.slice(HEADER_SIZE + count)),
     };
     if (![frame.resolution, frame.originX, frame.originY, frame.originYaw].every(Number.isFinite) || frame.resolution <= 0) throw new Error("terrain 地图几何信息无效");
-    for (const value of frame.labels) if (value > 6) throw new Error(`terrain 包含非法 label ${value}`);
+    for (const value of frame.labels) if (![0, 1, 5, 6, 7].includes(value)) throw new Error(`terrain 包含非法 label ${value}`);
     return frame;
   }
 
@@ -126,7 +125,7 @@
     penaltyTime: $("trajectory-penalty-time"), penaltyTimeOutput: $("trajectory-penalty-time-output"), esdfWeight: $("trajectory-esdf-weight"), esdfWeightOutput: $("trajectory-esdf-weight-output"), resetParams: $("trajectory-reset-params"),
     coordinate: $("trajectory-coordinate"), worldCoordinate: $("trajectory-world-coordinate"), cellValue: $("trajectory-cell-value"), replanState: $("trajectory-replan-state"),
     planTime: $("trajectory-plan-time"), globalLength: $("trajectory-global-length"), mincoLength: $("trajectory-minco-length"), pathPoints: $("trajectory-path-points"),
-    directionalCells: $("trajectory-directional-cells"), blockedCells: $("trajectory-blocked-cells"), obstacleCount: $("trajectory-obstacle-count"), cmdCount: $("trajectory-cmd-count"), impactNote: $("trajectory-impact-note"),
+    blockedCells: $("trajectory-blocked-cells"), obstacleCount: $("trajectory-obstacle-count"), cmdCount: $("trajectory-cmd-count"), impactNote: $("trajectory-impact-note"),
   };
   if (!dom.canvas || typeof dom.canvas.getContext !== "function") return;
   const context = dom.canvas.getContext("2d", { alpha: false });
@@ -188,7 +187,7 @@
   }
   async function loadTerrain() {
     const entry = selectedMap(); if (!entry) return;
-    dom.load.disabled = true; dom.sourceNote.textContent = "正在读取 terrain label 与 direction…";
+    dom.load.disabled = true; dom.sourceNote.textContent = "正在读取 terrain label…";
     try {
       const response = await fetch(`/api/editor/terrain?${new URLSearchParams({ map_name: entry.name })}`, { cache: "no-store" });
       if (!response.ok) throw await responseError(response);
@@ -302,23 +301,10 @@
     context.save(); context.fillStyle = color; context.strokeStyle = "#031010"; context.lineWidth = 2; context.beginPath(); context.arc(point.x, point.y, 7, 0, Math.PI * 2); context.fill(); context.stroke();
     context.fillStyle = "#041111"; context.font = "700 10px ui-monospace, monospace"; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(label, point.x, point.y + 0.5); context.restore();
   }
-  function drawDirections() {
-    const frame = state.frame; if (!frame || state.scale < 2.5) return;
-    const stride = Math.max(1, Math.ceil(18 / state.scale)), length = Math.max(4, Math.min(11, state.scale * 0.38));
-    context.save(); context.strokeStyle = "rgba(245, 220, 135, .68)"; context.fillStyle = "rgba(245, 220, 135, .78)"; context.lineWidth = 1;
-    for (let y = 0; y < frame.height; y += stride) for (let x = 0; x < frame.width; x += stride) {
-      const index = y * frame.width + x, label = frame.labels[index]; if (label < 2 || label > 6) continue;
-      const angle = frame.directions[index] / 255 * Math.PI * 2 + frame.originYaw, center = screenPoint({ x: x + 0.5, y: y + 0.5 });
-      const localAngle = angle - frame.originYaw, dx = Math.cos(localAngle) * length, dy = -Math.sin(localAngle) * length;
-      context.beginPath(); context.moveTo(center.x - dx * 0.55, center.y - dy * 0.55); context.lineTo(center.x + dx * 0.55, center.y + dy * 0.55); context.stroke();
-      context.beginPath(); context.arc(center.x + dx * 0.55, center.y + dy * 0.55, 1.5, 0, Math.PI * 2); context.fill();
-    }
-    context.restore();
-  }
   function render() {
     const box = fitCanvasDimensions(); context.setTransform(box.ratio, 0, 0, box.ratio, 0, 0); context.fillStyle = "#030708"; context.fillRect(0, 0, box.width, box.height);
     if (!state.frame) return;
-    rebuildMapImage(); context.imageSmoothingEnabled = false; context.drawImage(state.mapCanvas, state.offsetX, state.offsetY, state.frame.width * state.scale, state.frame.height * state.scale); drawDirections();
+    rebuildMapImage(); context.imageSmoothingEnabled = false; context.drawImage(state.mapCanvas, state.offsetX, state.offsetY, state.frame.width * state.scale, state.frame.height * state.scale);
     context.save(); context.fillStyle = "rgba(255, 65, 61, .88)";
     for (const index of state.obstacles) { const x = index % state.frame.width, y = Math.floor(index / state.frame.width), topLeft = screenPoint({ x, y: y + 1 }); context.fillRect(topLeft.x, topLeft.y, Math.max(1, state.scale), Math.max(1, state.scale)); }
     context.restore(); drawWorldPath(state.globalPath, "#49e8d4", 2.5); drawWorldPath(state.mincoPath, "#f0b85c", 3.2); drawMarker(state.start, "#53d99f", "V"); drawMarker(state.goal, "#ff716a", "G");
@@ -329,9 +315,9 @@
     dom.globalLength.textContent = state.globalPath.length ? `${pathLength(state.globalPath).toFixed(2)} m` : "—";
     dom.mincoLength.textContent = state.mincoPath.length ? `${pathLength(state.mincoPath).toFixed(2)} m` : "—";
     dom.pathPoints.textContent = `${state.globalPath.length} / ${state.mincoPath.length}`; dom.obstacleCount.textContent = state.obstacles.size.toLocaleString("zh-CN");
-    const constraints = status?.constraints || {}; dom.directionalCells.textContent = Number(constraints.directional || 0).toLocaleString("zh-CN"); dom.blockedCells.textContent = Number(constraints.blocked || 0).toLocaleString("zh-CN");
+    const constraints = status?.constraints || {}; dom.blockedCells.textContent = Number(constraints.blocked || 0).toLocaleString("zh-CN");
     dom.cmdCount.textContent = Number(status?.isolated_cmd_vel?.received || 0).toLocaleString("zh-CN"); dom.planTime.textContent = status?.plan_elapsed_seconds ? `${Number(status.plan_elapsed_seconds).toFixed(1)} s` : "—";
-    if (state.mincoPath.length) dom.impactNote.textContent = `当前显示来自 mas2027_nav_executor 的 ${state.globalPath.length} 点全局搜索折线与 ${state.mincoPath.length} 点 MINCO 轨迹；背景 label/direction 和值 50 的方向限制格均来自项目实际 terrain 语义。`;
+    if (state.mincoPath.length) dom.impactNote.textContent = `当前显示来自 mas2027_nav_executor 的 ${state.globalPath.length} 点全局搜索折线与 ${state.mincoPath.length} 点 MINCO 轨迹，背景为地图地形标签。`;
     else if (state.plannerState === "ERROR") dom.impactNote.textContent = status?.message || "真实规划器发生错误，请查看隔离日志。";
   }
   function updateControls() {
@@ -355,7 +341,7 @@
   function updateHover(cell) {
     if (!cell || !state.frame) return; const index = cell.y * state.frame.width + cell.x, world = cellToWorld(state.frame, { x: cell.x + 0.5, y: cell.y + 0.5 });
     dom.coordinate.textContent = `栅格 X ${cell.x} · Y ${cell.y}`; dom.worldCoordinate.textContent = `世界 ${world.x.toFixed(2)}, ${world.y.toFixed(2)} m`;
-    const label = state.frame.labels[index], degrees = state.frame.directions[index] / 255 * 360; dom.cellValue.textContent = label >= 2 ? `${label} · ${LABEL_NAMES[label]} · direction ${degrees.toFixed(0)}°` : `${label} · ${LABEL_NAMES[label]}`;
+    const label = state.frame.labels[index]; dom.cellValue.textContent = `${label} · ${LABEL_NAMES[label]}`;
   }
   function paintObstacle(cell, erase) {
     if (!cell || !state.frame) return;

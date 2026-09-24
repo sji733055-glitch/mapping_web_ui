@@ -15,7 +15,6 @@
     undo: $("editor-undo"), historyLabel: $("editor-history-label"), palette: $("editor-label-palette"),
     frameX: $("editor-frame-x"), frameY: $("editor-frame-y"), frameYaw: $("editor-frame-yaw"),
     framePick: $("editor-frame-pick"), frameApply: $("editor-frame-apply"), frameNote: $("editor-frame-note"), frameRevision: $("editor-frame-revision"),
-    directionCard: $("editor-direction-card"), direction: $("editor-direction"), directionValue: $("editor-direction-value"), directionArrow: $("editor-direction-arrow"), showArrows: $("editor-show-arrows"),
     save: $("editor-save"), saveStatus: $("editor-save-status"), coordinate: $("editor-coordinate"), worldCoordinate: $("editor-world-coordinate"), cellValue: $("editor-cell-value"), dirty: $("editor-dirty")
   };
 
@@ -36,21 +35,19 @@
   const terrainLabels = [
     { value: 0, name: "平地", color: "#4caf50" },
     { value: 1, name: "障碍物", color: "#f44336" },
-    { value: 2, name: "斜坡", color: "#ff9800" },
-    { value: 3, name: "一级台阶", color: "#ffeb3b" },
-    { value: 4, name: "二级台阶", color: "#9c27b0" },
-    { value: 5, name: "飞坡", color: "#00bcd4" },
-    { value: 6, name: "高台阶", color: "#00f2ff" }
+    { value: 5, name: "上坡", color: "#ff9800" },
+    { value: 6, name: "隧道", color: "#9c27b0" },
+    { value: 7, name: "起伏路段", color: "#00bcd4" }
   ];
   const terrainRgb = [
-    [76, 175, 80], [244, 67, 54], [255, 152, 0], [255, 235, 59],
-    [156, 39, 176], [0, 188, 212], [0, 242, 255]
+    [76, 175, 80], [244, 67, 54], null, null, null,
+    [255, 152, 0], [156, 39, 176], [0, 188, 212]
   ];
 
   const state = {
     maps: [], mapName: "", layer: null, width: 0, height: 0, resolution: 0.05,
-    originX: 0, originY: 0, originYaw: 0, values: null, direction: null,
-    dirty: false, busy: false, tool: "brush", label: 0, brushSize: 3, directionValue: 64,
+    originX: 0, originY: 0, originYaw: 0, values: null,
+    dirty: false, busy: false, tool: "brush", label: 0, brushSize: 3,
     zoom: 1, panX: 0, panY: 0, hover: null, drag: null, preview: null,
     history: [], historyBytes: 0, renderPending: false, mapImageDirty: true,
     mapCanvas: document.createElement("canvas"), mapsLoaded: false, frameDraft: null,
@@ -304,27 +301,23 @@
     const width = view.getUint32(8, true), height = view.getUint32(12, true);
     const count = width * height;
     if (!Number.isSafeInteger(count) || count <= 0) throw new Error("地图尺寸无效");
-    const channels = layer === LAYER_OCCUPANCY ? 1 : layer === LAYER_TERRAIN ? 2 : 0;
-    if (!channels || buffer.byteLength !== HEADER_SIZE + count * channels) throw new Error("地图通道或数据长度无效");
+    if (![LAYER_OCCUPANCY, LAYER_TERRAIN].includes(layer) || buffer.byteLength !== HEADER_SIZE + count) throw new Error("地图通道或数据长度无效");
     return {
       layer, width, height,
       resolution: view.getFloat64(16, true), originX: view.getFloat64(24, true), originY: view.getFloat64(32, true), originYaw: view.getFloat64(40, true),
-      values: new Uint8Array(buffer.slice(HEADER_SIZE, HEADER_SIZE + count)),
-      direction: layer === LAYER_TERRAIN ? new Uint8Array(buffer.slice(HEADER_SIZE + count)) : null
+      values: new Uint8Array(buffer.slice(HEADER_SIZE, HEADER_SIZE + count))
     };
   }
 
   function encodeEditorPayload() {
     const count = state.width * state.height;
-    const channels = state.layer === LAYER_TERRAIN ? 2 : 1;
-    const buffer = new ArrayBuffer(HEADER_SIZE + count * channels);
+    const buffer = new ArrayBuffer(HEADER_SIZE + count);
     const view = new DataView(buffer);
     for (let index = 0; index < MAGIC.length; index += 1) view.setUint8(index, MAGIC.charCodeAt(index));
     view.setUint8(4, state.layer);
     view.setUint32(8, state.width, true); view.setUint32(12, state.height, true);
     view.setFloat64(16, state.resolution, true); view.setFloat64(24, state.originX, true); view.setFloat64(32, state.originY, true); view.setFloat64(40, state.originYaw, true);
     new Uint8Array(buffer, HEADER_SIZE, count).set(state.values);
-    if (state.direction) new Uint8Array(buffer, HEADER_SIZE + count, count).set(state.direction);
     return buffer;
   }
 
@@ -342,7 +335,7 @@
       if (mapChanged) clearCloudOverlay();
       state.mapName = entry.name; state.layer = decoded.layer; state.width = decoded.width; state.height = decoded.height;
       state.resolution = decoded.resolution; state.originX = decoded.originX; state.originY = decoded.originY; state.originYaw = decoded.originYaw;
-      state.values = decoded.values; state.direction = decoded.direction; state.dirty = false;
+      state.values = decoded.values; state.dirty = false;
       state.history = []; state.historyBytes = 0; state.hover = null; state.drag = null; state.preview = null;
       state.frameDraft = null; dom.frameX.value = "0"; dom.frameY.value = "0"; dom.frameYaw.value = "0";
       state.label = decoded.layer === LAYER_OCCUPANCY ? 0 : 1;
@@ -393,7 +386,7 @@
     }
     let overwrite = false;
     if (entry.has_terrain) {
-      overwrite = window.confirm("重新生成会覆盖已有 terrain 语义和方向标注。确认从当前二维 PGM 重建吗？");
+      overwrite = window.confirm("重新生成会覆盖已有 terrain 地形标签。确认从当前二维 PGM 重建吗？");
       if (!overwrite) return;
     }
     state.busy = true; updateSourceControls(); dom.saveStatus.textContent = "正在把二维占据图转换为 terrain msgpack…";
@@ -533,7 +526,7 @@
       return;
     }
     if (state.dirty && !(await saveCurrent({ quiet: true }))) return;
-    const terrainText = entry.has_terrain ? "、terrain 语义与方向" : "";
+    const terrainText = entry.has_terrain ? "、terrain 地形标签" : "";
     if (!window.confirm(`将以当前坐标 (${originX.toFixed(3)}, ${originY.toFixed(3)}) 为新 map 原点，并把 +X 设为 ${(heading * 180 / Math.PI).toFixed(1)}°。\n\n完整 PCD、PGM/YAML${terrainText}会成组变换；二维栅格旋转会进行最近邻重采样，操作不能在网页中撤销。确认继续吗？`)) return;
     const previousLayer = state.layer;
     const restoreCloudOverlay = state.cloudVisible;
@@ -576,7 +569,6 @@
       button.addEventListener("click", () => selectLabel(label.value));
       dom.palette.appendChild(button);
     }
-    updateDirectionUi();
   }
 
   function selectLabel(value) {
@@ -586,16 +578,7 @@
       const active = Number(button.dataset.value) === value;
       button.classList.toggle("is-active", active); button.setAttribute("aria-checked", String(active));
     }
-    updateDirectionUi(); scheduleRender();
-  }
-
-  function updateDirectionUi() {
-    const directional = state.layer === LAYER_TERRAIN && state.label >= 2;
-    dom.direction.disabled = !directional;
-    dom.directionCard.classList.toggle("is-disabled", !directional);
-    const degrees = state.directionValue / 255 * 360;
-    dom.directionValue.textContent = `${degrees.toFixed(0)}° · ${state.directionValue}`;
-    dom.directionArrow.style.transform = `rotate(${-degrees}deg)`;
+    scheduleRender();
   }
 
   function updateEditorUi() {
@@ -613,14 +596,12 @@
     dom.canvas.classList.toggle("is-panning", state.tool === "pan");
     dom.canvas.classList.toggle("is-frame-picking", state.tool === "frame");
     updateCloudUi();
-    updateDirectionUi();
   }
 
   function snapshotForUndo() {
     if (!state.values) return;
     const snapshot = {
-      values: state.values.slice(), direction: state.direction ? state.direction.slice() : null,
-      bytes: state.values.byteLength + (state.direction?.byteLength || 0)
+      values: state.values.slice(), bytes: state.values.byteLength
     };
     state.history.push(snapshot); state.historyBytes += snapshot.bytes;
     while (state.history.length > 1 && (state.history.length > MAX_HISTORY_STEPS || state.historyBytes > MAX_HISTORY_BYTES)) {
@@ -638,7 +619,7 @@
   function undo() {
     const snapshot = state.history.pop();
     if (!snapshot) return;
-    state.historyBytes -= snapshot.bytes; state.values = snapshot.values; state.direction = snapshot.direction;
+    state.historyBytes -= snapshot.bytes; state.values = snapshot.values;
     state.dirty = true; state.mapImageDirty = true; state.preview = null;
     updateEditorUi(); scheduleRender();
   }
@@ -704,33 +685,8 @@
       ctx.drawImage(state.cloudCanvas, state.panX, state.panY, state.width * state.zoom, state.height * state.zoom);
       ctx.restore();
     }
-    drawDirections(ctx);
     drawPreview(ctx);
     drawCoordinateFrame(ctx);
-  }
-
-  function drawDirections(context) {
-    if (state.layer !== LAYER_TERRAIN || !state.direction || !dom.showArrows.checked) return;
-    const cellStep = Math.max(1, Math.ceil(26 / state.zoom));
-    const arrowLength = Math.max(8, Math.min(22, cellStep * state.zoom * 0.72));
-    let drawn = 0;
-    context.lineWidth = 1.4; context.strokeStyle = "rgba(238,255,253,.86)"; context.fillStyle = "rgba(238,255,253,.86)";
-    for (let y = 0; y < state.height && drawn < 5000; y += cellStep) {
-      for (let x = 0; x < state.width && drawn < 5000; x += cellStep) {
-        const index = y * state.width + x;
-        if (state.values[index] < 2) continue;
-        const angle = state.direction[index] / 255 * Math.PI * 2 - state.originYaw;
-        const sx = state.panX + (x + 0.5) * state.zoom;
-        const sy = state.panY + (state.height - y - 0.5) * state.zoom;
-        const ex = sx + Math.cos(angle) * arrowLength, ey = sy - Math.sin(angle) * arrowLength;
-        context.beginPath(); context.moveTo(sx, sy); context.lineTo(ex, ey); context.stroke();
-        const head = Math.max(3, arrowLength * 0.28);
-        context.beginPath(); context.moveTo(ex, ey);
-        context.lineTo(ex - Math.cos(angle - 0.55) * head, ey + Math.sin(angle - 0.55) * head);
-        context.lineTo(ex - Math.cos(angle + 0.55) * head, ey + Math.sin(angle + 0.55) * head);
-        context.closePath(); context.fill(); drawn += 1;
-      }
-    }
   }
 
   function drawPreview(context) {
@@ -864,8 +820,7 @@
       const world = mapCellToWorld(x, y), worldX = world.x, worldY = world.y;
       dom.coordinate.textContent = `栅格 X ${x} · Y ${y}`;
       dom.worldCoordinate.textContent = `世界 ${worldX.toFixed(2)}, ${worldY.toFixed(2)} m`;
-      const direction = state.layer === LAYER_TERRAIN && state.values[index] >= 2 ? ` · ${(state.direction[index] / 255 * 360).toFixed(0)}°` : "";
-      dom.cellValue.textContent = `${labelName(state.values[index])}${direction}`;
+      dom.cellValue.textContent = labelName(state.values[index]);
     }
     scheduleRender();
   }
@@ -883,21 +838,19 @@
     }
   }
 
-  function paintCell(x, y, directionValue = state.directionValue) {
+  function paintCell(x, y) {
     if (x < 0 || y < 0 || x >= state.width || y >= state.height) return false;
     const index = y * state.width + x;
-    const nextDirection = state.layer === LAYER_TERRAIN && state.label >= 2 ? directionValue : 0;
-    if (state.values[index] === state.label && (!state.direction || state.direction[index] === nextDirection)) return false;
+    if (state.values[index] === state.label) return false;
     state.values[index] = state.label;
-    if (state.direction) state.direction[index] = nextDirection;
     return true;
   }
 
-  function paintBrush(x, y, directionValue = state.directionValue) {
+  function paintBrush(x, y) {
     const offset = -Math.floor(state.brushSize / 2);
     let changed = false;
     for (let dy = offset; dy < offset + state.brushSize; dy += 1) {
-      for (let dx = offset; dx < offset + state.brushSize; dx += 1) changed = paintCell(x + dx, y + dy, directionValue) || changed;
+      for (let dx = offset; dx < offset + state.brushSize; dx += 1) changed = paintCell(x + dx, y + dy) || changed;
     }
     return changed;
   }
@@ -916,19 +869,9 @@
     if (changed) markChanged();
   }
 
-  function directionFromLine(from, to) {
-    const dx = to.x - from.x, dy = to.y - from.y, length = Math.hypot(dx, dy);
-    if (length < 1e-6) return 0;
-    let angle = Math.atan2(dx / length, -dy / length) + state.originYaw;
-    angle %= Math.PI * 2;
-    if (angle < 0) angle += Math.PI * 2;
-    return Math.max(0, Math.min(255, Math.round(angle / (Math.PI * 2) * 255)));
-  }
-
   function applyLine(from, to) {
-    const directionValue = directionFromLine(from, to);
     let changed = false;
-    rasterLine(from.x, from.y, to.x, to.y, (x, y) => { changed = paintBrush(x, y, directionValue) || changed; });
+    rasterLine(from.x, from.y, to.x, to.y, (x, y) => { changed = paintBrush(x, y) || changed; });
     if (changed) markChanged();
   }
 
@@ -1037,7 +980,6 @@
   dom.zoomIn.addEventListener("click", () => zoomAt(1.25));
   dom.zoomOut.addEventListener("click", () => zoomAt(0.8));
   dom.brushSize.addEventListener("input", () => { state.brushSize = Number(dom.brushSize.value); dom.brushOutput.textContent = `${state.brushSize} px`; scheduleRender(); });
-  dom.direction.addEventListener("input", () => { state.directionValue = Number(dom.direction.value); updateDirectionUi(); });
   dom.showArrows.addEventListener("change", scheduleRender);
   for (const button of document.querySelectorAll("[data-editor-tool]")) button.addEventListener("click", () => setTool(button.dataset.editorTool));
 
@@ -1057,7 +999,7 @@
     if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "p" && !dom.cloudToggle.disabled) {
       event.preventDefault(); toggleCloudOverlay(); return;
     }
-    if (/^[0-6]$/.test(event.key)) selectLabel(Number(event.key));
+    if (/^[01567]$/.test(event.key)) selectLabel(Number(event.key));
   });
 
   window.addEventListener("resize", resizeCanvas);

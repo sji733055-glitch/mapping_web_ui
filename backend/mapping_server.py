@@ -660,7 +660,7 @@ class MappingSupervisor(Node):
         self._trajectory_plan_started_at = 0.0
         self._trajectory_global_received_at = 0.0
         self._trajectory_minco_received_at = 0.0
-        self._trajectory_constraints = {"free": 0, "directional": 0, "blocked": 0, "unknown": 0}
+        self._trajectory_constraints = {"free": 0, "blocked": 0, "unknown": 0}
         self._trajectory_cmd = {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0, "received": 0}
         self._trajectory_generation = 0
         self._trajectory_last_cloud_publish = 0.0
@@ -1479,7 +1479,6 @@ class MappingSupervisor(Node):
         with self._trajectory_lock:
             self._trajectory_constraints = {
                 "free": int(np.count_nonzero(values == 0)),
-                "directional": int(np.count_nonzero(values == 50)),
                 "blocked": int(np.count_nonzero(values >= 100)),
                 "unknown": int(np.count_nonzero(values < 0)),
             }
@@ -1607,7 +1606,7 @@ class MappingSupervisor(Node):
             self._trajectory_minco_path = []
             self._trajectory_global_received_at = 0.0
             self._trajectory_minco_received_at = 0.0
-            self._trajectory_constraints = {"free": 0, "directional": 0, "blocked": 0, "unknown": 0}
+            self._trajectory_constraints = {"free": 0, "blocked": 0, "unknown": 0}
             self._trajectory_cmd = {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0, "received": 0}
             self._trajectory_plan_started_at = time.monotonic()
             self._trajectory_last_cloud_publish = 0.0

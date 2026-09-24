@@ -13,7 +13,7 @@
 - 支持 `data/pcd` 中已有的 ASCII 或未压缩 binary PCD（允许 intensity 等附加字段），可在三维预览中只看当前 Z 切片范围内的点；
 - 在“地图编辑”工作区用笔刷、矩形或画线修整二维 PGM 占据图，并可撤销、缩放和平移；
 - 可直接在二维图上点选新 `map` 原点并拖出 `map +X` 方向，成组变换完整 PCD、PGM/YAML 和已有 terrain，为后续重定位发布 `map→odom` TF 固定统一的地图基准；
-- 把 PGM/YAML 一键转换为 HW `map_server` 使用的 terrain msgpack，再标注平地、障碍、斜坡、各级台阶、飞坡及其方向；
+- 把 PGM/YAML 一键转换为导航 `map_server` 使用的 terrain msgpack，再标注平地、障碍、上坡、隧道和起伏路段；
 - 在“ROGMap 分类”工作区直接查看 `projection_layer` 四分类，点选桌子所在格后查看 `height_delta`、占据高度、占据层数与竖直占据率，并在浏览器中 what-if 试调 surface/wall/tunnel 阈值；
 - 在“轨迹验证”工作区只读导入已有 terrain，用一份完全隔离的真实 `map_server` + `nav_executor` 复现全局折线与 MINCO 轨迹，并在质点运行中放置临时障碍观察真实重规划；
 - 同时发布 `/mapping/accumulated_cloud` 与 `/mapping/status`，仍可在 RViz/Foxglove 中观察；
@@ -98,7 +98,7 @@ robot_state_publisher → mid360_driver → small_point_lio
 隔离边界（页面上有同样的说明）：
 
 - 该工作区只使用 `/mapping/trajectory_lab/*`，不订阅也不发布实车的 `/goal_pose`、`/Odometry`、`/cloud_registered` 或 `/cmd_vel`；
-- 隔离执行器的 `cmd_vel`、`/opt_path`、cost/direction 地图、planning constraints 与可视化话题全部被重映射进该命名空间；
+- 隔离执行器的 `cmd_vel`、`/opt_path`、cost/terrain label 地图、planning constraints 与可视化话题全部被重映射进该命名空间；
 - 车体位姿、目标与 brush 障碍只发布到隔离话题，绝不进入实车 ROGMap；
 - 右侧 6 个滑块（`safe_dist`、`collision_dist`、`max_velocity`、`max_acceleration`、`penalty_weight_time`、`esdf_weight`）作为**临时 ROS 参数覆盖**传给隔离执行器，不写 `planner_params.yaml`、`node_params.yaml` 或 terrain；改参数后点“重新启动并规划”生效。
 
@@ -215,14 +215,14 @@ colcon build --symlink-install --packages-select small_point_lio \
 
 1. 从 `data/map` 选择地图，点击“编辑二维 PGM”。二维层提供障碍物、可通行、未知区域三类像素，可用笔刷、矩形和画线修图；保存只原子替换该地图 YAML 引用的 PGM，不改变 YAML 的分辨率或原点。
 2. 点画布右上角“点云 P”，或在非输入框聚焦时按 `P`，可显示/隐藏同名 PCD 的青色俯视点层。网页先按后端当前的障碍高度窗口取点，再只使用 XY 投影；点云与 PGM 共用 YAML 原点、分辨率和 yaw，缩放或平移时保持重合。青色点仍存在的黑格可视为有点云支撑；只有黑格而没有青色点的区域可重点复核，再用“可通行”笔刷清掉不存在的障碍。此叠加层只读 PCD，不会修改点云或地图。
-3. 在“map 坐标系”中点击“在图上拖出原点与 +X”后有三种手势：在空白处按下＝该点成为新 `(0,0)` 并拖出 `map +X`；拖动原点圆圈＝平移坐标系且保持朝向；拖动 +X 箭头＝只转向且保持原点。也可以在输入框中直接填写原点在当前地图中的 X/Y 和 +X 朝向角。点击“统一 PCD 与二维图坐标系”并确认后，后端会对同名完整 PCD 应用相同二维刚体变换，把 PGM 和已有 terrain 最近邻重采样到 yaw=0 的轴对齐栅格，并同步旋转 terrain 方向。建议在精修 PGM/terrain 前先定义坐标系，避免重复重采样。
+3. 在“map 坐标系”中点击“在图上拖出原点与 +X”后有三种手势：在空白处按下＝该点成为新 `(0,0)` 并拖出 `map +X`；拖动原点圆圈＝平移坐标系且保持朝向；拖动 +X 箭头＝只转向且保持原点。也可以在输入框中直接填写原点在当前地图中的 X/Y 和 +X 朝向角。点击“统一 PCD 与二维图坐标系”并确认后，后端会对同名完整 PCD 应用相同二维刚体变换，把 PGM 和已有 terrain 最近邻重采样到 yaw=0 的轴对齐栅格。建议在精修 PGM/terrain 前先定义坐标系，避免重复重采样。
 4. 点击“生成 terrain MSG”。后端按 YAML 的 `occupied_thresh` 和 `negate` 把二维图转换为 `<地图名称>_terrain.msgpack`，随后自动打开 terrain 图层。
-5. 在 terrain 图层选择 `0–6` 标签；斜坡、台阶和飞坡可设置方向。画线工具会使用线段左侧法向作为通过方向，笔刷和矩形使用方向滑块的值。
-6. 点击“保存当前图层”。输出采用 `mas_nav_2027_native` 当前 `map_server` 可直接读取的 `width`、`height`、`resolution`、`terrain`、`direction` MessagePack 字段；两个 uint8 通道按 MessagePack ARRAY 写入，与导航端的 `via.array` 加载方式一致。网页仍可读取旧 BIN 格式，保存一次即自动迁移为 ARRAY。
+5. 在 terrain 图层选择 `0` 平地、`1` 障碍，或与底盘 mode 同号的 `5` 上坡、`6` 隧道、`7` 起伏路段。笔刷、矩形和画线只修改标签。
+6. 点击“保存当前图层”。输出采用 `mas_nav_2027_native` 当前 `map_server` 可直接读取的 `width`、`height`、`resolution`、`terrain` MessagePack 字段；标签通道按 MessagePack ARRAY 写入，与导航端的 `via.array` 加载方式一致。网页仍可读取旧 BIN 格式，保存时会移除旧方向字段并将标签迁移为 ARRAY。
 
 坐标系设置需要 `data/pcd/<名称>.pcd` 与 PGM/YAML 同名存在；缺少 PCD 时网页会禁用应用按钮，避免只改二维图。操作会生成 `<名称>_frame.json`，其中 `source_to_map` 是把原始 LIO/odom 点坐标变换到固定 map 坐标的变换，也就是后续 TF 中 `map→odom` 所需的平面变换语义；`map_to_source` 是其逆变换。重复定义会在元数据中累计组合，但每次都需要重采样二维栅格，因此应尽量一次定准。
 
-重新从 PGM 生成已存在的 terrain 文件前，网页会明确提示该操作会覆盖已有语义和方向标注。地图编辑和坐标系设置使用普通同源 HTTP 接口，不依赖 WebSocket，因此在 VS Code Remote SSH 的 HTTP 兼容模式下也能使用。
+重新从 PGM 生成已存在的 terrain 文件前，网页会明确提示该操作会覆盖已有地形标签。地图编辑和坐标系设置使用普通同源 HTTP 接口，不依赖 WebSocket，因此在 VS Code Remote SSH 的 HTTP 兼容模式下也能使用。
 
 ## 输出
 

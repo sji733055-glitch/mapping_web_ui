@@ -297,13 +297,8 @@ input[type="range"] { accent-color: var(--cyan); }
 .label-chip i { width: 11px; height: 11px; flex: none; border-radius: 2px; background: var(--label-color); box-shadow: 0 0 8px color-mix(in srgb, var(--label-color) 45%, transparent); }
 .label-chip:hover { border-color: var(--line-strong); color: var(--text); }
 .label-chip.is-active { border-color: var(--label-color); color: var(--text); background: color-mix(in srgb, var(--label-color) 10%, transparent); }
-.editor-direction-card input[type="range"] { width: 100%; }
-.editor-direction-card input:disabled { opacity: .32; }
-.direction-preview { height: 35px; display: grid; place-items: center; margin: 6px 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: repeating-linear-gradient(90deg, transparent 0 15px, rgba(73,232,212,.025) 15px 16px); }
-.direction-preview i { color: var(--cyan); font-size: 26px; font-style: normal; line-height: 1; filter: drop-shadow(0 0 5px rgba(73,232,212,.45)); transform: rotate(-90deg); }
 .check-row { display: flex; align-items: center; gap: 8px; color: var(--muted-2); font-size: 13px; }
 .check-row input { accent-color: var(--cyan); }
-.editor-direction-card p { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .primary-save-button { width: 100%; min-height: 42px; border: 1px solid rgba(73,232,212,.45); border-radius: 6px; background: linear-gradient(135deg, #63ead7, #2fc8b9); color: #062522; cursor: pointer; font-size: 14px; font-weight: 750; }
 .primary-save-button:disabled { opacity: .3; cursor: not-allowed; filter: saturate(.2); }
 .editor-save-card p { min-height: 17px; margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
@@ -360,7 +355,7 @@ input[type="range"] { accent-color: var(--cyan); }
 .trajectory-terrain-key { position: absolute; top: 12px; right: 12px; display: grid; grid-template-columns: auto auto; gap: 5px 9px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: rgba(3,9,10,.84); color: var(--muted-2); font-size: 9px; pointer-events: none; }
 .trajectory-terrain-key span { display: inline-flex; align-items: center; gap: 5px; }
 .trajectory-terrain-key i { width: 9px; height: 9px; border: 1px solid rgba(255,255,255,.13); border-radius: 2px; }
-.trajectory-terrain-key .label-0 { background: rgb(27,55,48); }.trajectory-terrain-key .label-1 { background: rgb(112,42,42); }.trajectory-terrain-key .label-2 { background: rgb(104,71,29); }.trajectory-terrain-key .label-3 { background: rgb(100,94,35); }.trajectory-terrain-key .label-4 { background: rgb(82,43,91); }.trajectory-terrain-key .label-5 { background: rgb(24,79,86); }.trajectory-terrain-key .label-6 { background: rgb(24,91,98); }
+.trajectory-terrain-key .label-0 { background: rgb(27,55,48); }.trajectory-terrain-key .label-1 { background: rgb(112,42,42); }.trajectory-terrain-key .label-5 { background: rgb(104,71,29); }.trajectory-terrain-key .label-6 { background: rgb(82,43,91); }.trajectory-terrain-key .label-7 { background: rgb(24,79,86); }
 .trajectory-rail { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 2px; scrollbar-width: thin; scrollbar-color: rgba(73,232,212,.25) transparent; }
 .trajectory-load-button { width: 100%; min-height: 41px; margin-top: 9px; border: 1px solid rgba(73,232,212,.42); border-radius: 5px; background: rgba(73,232,212,.09); color: var(--cyan); cursor: pointer; font-size: 13px; font-weight: 700; }
 .trajectory-load-button:hover:not(:disabled) { background: rgba(73,232,212,.15); }

@@ -386,14 +386,6 @@
             <div class="label-palette" id="editor-label-palette" role="radiogroup" aria-label="栅格标签"></div>
           </section>
 
-          <section class="control-card editor-direction-card" id="editor-direction-card">
-            <div class="compact-title-row"><h2>通过方向</h2><span id="editor-direction-value">90° · 64</span></div>
-            <input id="editor-direction" type="range" min="0" max="255" value="64" disabled />
-            <div class="direction-preview" aria-hidden="true"><i id="editor-direction-arrow">➜</i></div>
-            <label class="check-row"><input id="editor-show-arrows" type="checkbox" checked /> 显示方向箭头</label>
-            <p>画线模式会自动采用线段左侧法向；笔刷和矩形使用上方设定值。</p>
-          </section>
-
           <section class="control-card editor-save-card">
             <button class="primary-save-button" id="editor-save" type="button" disabled>保存当前图层</button>
             <p id="editor-save-status">尚未加载地图</p>
@@ -502,7 +494,7 @@
             <canvas id="trajectory-canvas" aria-label="terrain 全局与 MINCO 轨迹推演画布"></canvas>
             <div class="editor-empty" id="trajectory-empty">
               <strong>选择含 terrain 的地图</strong>
-              <span>加载 label 与 direction 后，设置起点、终点并在图上随时放置临时障碍。</span>
+              <span>加载地形标签后，设置起点、终点并在图上随时放置临时障碍。</span>
             </div>
             <div class="trajectory-legend" aria-label="轨迹图例">
               <span><i class="global"></i>真实全局搜索</span>
@@ -512,9 +504,8 @@
             </div>
             <div class="trajectory-terrain-key" aria-label="terrain label 图例">
               <span><i class="label-0"></i>0 平地</span><span><i class="label-1"></i>1 障碍</span>
-              <span><i class="label-2"></i>2 斜坡</span><span><i class="label-3"></i>3 一级台阶</span>
-              <span><i class="label-4"></i>4 二级台阶</span><span><i class="label-5"></i>5 飞坡</span>
-              <span><i class="label-6"></i>6 高台阶·仅顺向</span>
+              <span><i class="label-5"></i>5 上坡</span><span><i class="label-6"></i>6 隧道</span>
+              <span><i class="label-7"></i>7 起伏路段</span>
             </div>
           </div>
           <div class="editor-footer">
@@ -593,12 +584,11 @@
               <div><span>全局折线</span><b id="trajectory-global-length">—</b></div>
               <div><span>MINCO 轨迹</span><b id="trajectory-minco-length">—</b></div>
               <div><span>全局 / MINCO 点数</span><b id="trajectory-path-points">—</b></div>
-              <div><span>方向限制格（值 50）</span><b id="trajectory-directional-cells">—</b></div>
               <div><span>硬障碍格（值 100）</span><b id="trajectory-blocked-cells">—</b></div>
               <div><span>临时障碍</span><b id="trajectory-obstacle-count">0</b></div>
               <div><span>隔离 cmd_vel 接收</span><b id="trajectory-cmd-count">0</b></div>
             </div>
-            <p class="trajectory-impact-note" id="trajectory-impact-note">加载 terrain 后，真实全局与 MINCO 轨迹会叠加在 label/direction 图层上；方向限制格来自执行器实际发布的 planning_constraints。</p>
+            <p class="trajectory-impact-note" id="trajectory-impact-note">加载 terrain 后，真实全局与 MINCO 轨迹会叠加在地形标签图层上。</p>
           </section>
         </aside>
       </section>

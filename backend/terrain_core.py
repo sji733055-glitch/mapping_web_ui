@@ -1,11 +1,8 @@
-"""ROS-independent occupancy and HW terrain-map editing primitives.
+"""ROS-independent occupancy and terrain-map editing primitives.
 
 The browser uses a compact, fixed-layout payload while files on disk retain
-their native PGM/YAML and MessagePack representations.  New MessagePack files
-write the two uint8 channels as ARRAY values because the current
-``mas_nav_2027_native`` map server iterates ``via.array`` directly.  The reader
-continues to accept legacy BIN channels so existing maps remain editable and
-are migrated to ARRAY the next time they are saved.
+their native PGM/YAML and MessagePack representations. Terrain files contain
+only the uint8 label channel. Legacy direction data is ignored on read.
 """
 
 from __future__ import annotations
@@ -33,8 +30,7 @@ LEGACY_EDITOR_HEADER = struct.Struct("<4sB3xIIddd")
 LAYER_OCCUPANCY = 0
 LAYER_TERRAIN = 1
 MAX_EDITOR_CELLS = 16_000_000
-TERRAIN_LABEL_COUNT = 7
-_DIRECTIONAL_LABEL_MIN = 2
+TERRAIN_LABELS = (0, 1, 5, 6, 7)
 
 
 @dataclass(frozen=True)
@@ -68,7 +64,6 @@ class EditorMap:
     layer: int
     metadata: MapMetadata
     values: np.ndarray
-    direction: np.ndarray | None = None
 
     def validate(self) -> None:
         self.metadata.validate()
@@ -79,20 +74,11 @@ class EditorMap:
             raise ValueError("地图栅格数量与宽高不一致")
         self.values = np.ascontiguousarray(values.reshape(-1), dtype=np.uint8)
         if self.layer == LAYER_OCCUPANCY:
-            if self.direction is not None and np.asarray(self.direction).size:
-                raise ValueError("二维占据图不能包含方向通道")
-            self.direction = None
             return
-        if np.any(self.values >= TERRAIN_LABEL_COUNT):
-            bad = int(self.values[self.values >= TERRAIN_LABEL_COUNT][0])
-            raise ValueError(f"terrain 标签 {bad} 超出 0–6 范围")
-        if self.direction is None:
-            raise ValueError("terrain 地图缺少方向通道")
-        direction = np.asarray(self.direction, dtype=np.uint8)
-        if direction.size != self.metadata.cell_count:
-            raise ValueError("terrain 方向通道数量与宽高不一致")
-        self.direction = np.ascontiguousarray(direction.reshape(-1), dtype=np.uint8)
-        self.direction[self.values < _DIRECTIONAL_LABEL_MIN] = 0
+        invalid = ~np.isin(self.values, TERRAIN_LABELS)
+        if np.any(invalid):
+            bad = int(self.values[invalid][0])
+            raise ValueError(f"terrain 标签 {bad} 无效；只支持 0、1、5、6、7")
 
 
 def encode_editor_map(editor_map: EditorMap) -> bytes:
@@ -108,10 +94,7 @@ def encode_editor_map(editor_map: EditorMap) -> bytes:
         meta.origin_y,
         meta.origin_yaw,
     )
-    body = editor_map.values.tobytes(order="C")
-    if editor_map.direction is not None:
-        body += editor_map.direction.tobytes(order="C")
-    return header + body
+    return header + editor_map.values.tobytes(order="C")
 
 
 def decode_editor_map(payload: bytes) -> EditorMap:
@@ -131,20 +114,15 @@ def decode_editor_map(payload: bytes) -> EditorMap:
         raise ValueError("地图编辑数据 magic 不正确")
     metadata = MapMetadata(width, height, resolution, origin_x, origin_y, origin_yaw)
     metadata.validate()
-    channels = 1 if layer == LAYER_OCCUPANCY else 2 if layer == LAYER_TERRAIN else 0
-    if not channels:
+    if layer not in {LAYER_OCCUPANCY, LAYER_TERRAIN}:
         raise ValueError("未知地图编辑图层")
-    expected = header_size + metadata.cell_count * channels
+    expected = header_size + metadata.cell_count
     if len(payload) != expected:
         raise ValueError(f"地图编辑数据长度应为 {expected} 字节，实际为 {len(payload)}")
     start = header_size
     stop = start + metadata.cell_count
     values = np.frombuffer(payload[start:stop], dtype=np.uint8).copy()
-    direction = (
-        np.frombuffer(payload[stop:], dtype=np.uint8).copy()
-        if layer == LAYER_TERRAIN else None
-    )
-    result = EditorMap(layer, metadata, values, direction)
+    result = EditorMap(layer, metadata, values)
     result.validate()
     return result
 
@@ -344,13 +322,11 @@ def occupancy_to_terrain(yaml_path: Path) -> EditorMap:
     probability = pixels.astype(np.float32) / 255.0 if negate else (255.0 - pixels) / 255.0
     obstacle_top_down = probability >= occupied_thresh
     terrain = np.flipud(obstacle_top_down).astype(np.uint8).reshape(-1)
-    direction = np.zeros_like(terrain, dtype=np.uint8)
     height, width = pixels.shape
     result = EditorMap(
         LAYER_TERRAIN,
         MapMetadata(width, height, resolution, origin_x, origin_y, origin_yaw),
         terrain,
-        direction,
     )
     result.validate()
     return result
@@ -394,16 +370,15 @@ def _pack_uint8_array(values: np.ndarray) -> bytes:
 
 def pack_terrain_msgpack(editor_map: EditorMap) -> bytes:
     editor_map.validate()
-    if editor_map.layer != LAYER_TERRAIN or editor_map.direction is None:
+    if editor_map.layer != LAYER_TERRAIN:
         raise ValueError("只有 terrain 图层可以写入 msgpack")
     items = (
         ("width", b"\xD2" + struct.pack(">i", editor_map.metadata.width)),
         ("height", b"\xD2" + struct.pack(">i", editor_map.metadata.height)),
         ("resolution", b"\xCB" + struct.pack(">d", editor_map.metadata.resolution)),
         ("terrain", _pack_uint8_array(editor_map.values)),
-        ("direction", _pack_uint8_array(editor_map.direction)),
     )
-    return b"\x85" + b"".join(_pack_string(key) + value for key, value in items)
+    return b"\x84" + b"".join(_pack_string(key) + value for key, value in items)
 
 
 class _MessagePackReader:
@@ -512,16 +487,13 @@ def unpack_terrain_msgpack(
         height = int(data["height"])
         resolution = float(data["resolution"])
         terrain_value = data["terrain"]
-        direction_value = data["direction"]
     except (KeyError, TypeError, ValueError) as error:
-        raise ValueError("msgpack 缺少 width/height/resolution/terrain/direction") from error
+        raise ValueError("msgpack 缺少 width/height/resolution/terrain") from error
     terrain = np.frombuffer(terrain_value, dtype=np.uint8).copy() if isinstance(terrain_value, bytes) else np.asarray(terrain_value, dtype=np.uint8)
-    direction = np.frombuffer(direction_value, dtype=np.uint8).copy() if isinstance(direction_value, bytes) else np.asarray(direction_value, dtype=np.uint8)
     result = EditorMap(
         LAYER_TERRAIN,
         MapMetadata(width, height, resolution, origin_x, origin_y, origin_yaw),
         terrain,
-        direction,
     )
     result.validate()
     return result

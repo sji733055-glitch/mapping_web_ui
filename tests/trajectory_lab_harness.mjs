@@ -20,7 +20,7 @@ function check(label, condition) {
 }
 
 function terrainPayload(width, height, yaw = 0) {
-  const count = width * height, buffer = new ArrayBuffer(api.HEADER_SIZE + count * 2), view = new DataView(buffer);
+  const count = width * height, buffer = new ArrayBuffer(api.HEADER_SIZE + count), view = new DataView(buffer);
   for (const [index, value] of [..."MPE2"].entries()) view.setUint8(index, value.charCodeAt(0));
   view.setUint8(4, 1); view.setUint32(8, width, true); view.setUint32(12, height, true);
   view.setFloat64(16, 0.1, true); view.setFloat64(24, -1.0, true); view.setFloat64(32, -2.0, true); view.setFloat64(40, yaw, true);
@@ -28,7 +28,7 @@ function terrainPayload(width, height, yaw = 0) {
 }
 
 const frame = api.decodeTerrainPayload(terrainPayload(7, 5, Math.PI / 2));
-check("解码 MPE2 terrain 双通道", frame.width === 7 && frame.height === 5 && frame.labels.length === 35 && frame.directions.length === 35);
+check("解码 MPE2 terrain 标签通道", frame.width === 7 && frame.height === 5 && frame.labels.length === 35);
 const world = api.cellToWorld(frame, { x: 2.5, y: 3.5 });
 const roundTrip = api.worldToCell(frame, world);
 check("旋转地图的栅格/世界坐标可逆", Math.abs(roundTrip.x - 2.5) < 1e-9 && Math.abs(roundTrip.y - 3.5) < 1e-9);

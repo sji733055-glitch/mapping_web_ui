@@ -55,13 +55,18 @@ class TerrainCoreTests(unittest.TestCase):
         terrain = EditorMap(
             LAYER_TERRAIN,
             metadata,
-            np.array([0, 1, 2, 3, 4, 6], dtype=np.uint8),
-            np.array([99, 88, 64, 128, 200, 255], dtype=np.uint8),
+            np.array([0, 1, 5, 6, 7, 0], dtype=np.uint8),
         )
         decoded = decode_editor_map(encode_editor_map(terrain))
         np.testing.assert_array_equal(decoded.values, terrain.values)
-        # Non-directional labels must never retain stale direction values.
-        np.testing.assert_array_equal(decoded.direction, [0, 0, 64, 128, 200, 255])
+
+    def test_only_supported_special_labels_can_be_saved(self):
+        for value in (2, 3, 4, 8):
+            with self.subTest(label=value), self.assertRaisesRegex(ValueError, "无效"):
+                encode_editor_map(EditorMap(
+                    LAYER_TERRAIN, MapMetadata(1, 1, 0.05),
+                    np.array([value], dtype=np.uint8),
+                ))
 
     def test_map_listing_separates_has_yaml_from_has_occupancy(self):
         # The trajectory laboratory selects on `has_yaml && has_terrain`, and
@@ -89,7 +94,6 @@ class TerrainCoreTests(unittest.TestCase):
                 EditorMap(
                     LAYER_TERRAIN,
                     MapMetadata(4, 3, 0.05),
-                    np.zeros(12, dtype=np.uint8),
                     np.zeros(12, dtype=np.uint8),
                 ),
             )
@@ -135,55 +139,45 @@ class TerrainCoreTests(unittest.TestCase):
             negated = occupancy_to_terrain(yaml_path)
             np.testing.assert_array_equal(negated.values.reshape(2, 2), [[1, 0], [0, 1]])
 
-    def test_msgpack_round_trip_writes_native_array_channels(self):
+    def test_msgpack_round_trip_writes_single_native_array_channel(self):
         terrain = EditorMap(
             LAYER_TERRAIN,
             MapMetadata(3, 2, 0.1),
-            np.array([0, 1, 2, 3, 5, 6], dtype=np.uint8),
-            np.array([0, 0, 127, 128, 200, 255], dtype=np.uint8),
+            np.array([0, 1, 5, 6, 7, 0], dtype=np.uint8),
         )
         packed = pack_terrain_msgpack(terrain)
         terrain_field = packed.index(b"terrain") + len(b"terrain")
-        direction_field = packed.index(b"direction") + len(b"direction")
         self.assertEqual(packed[terrain_field], 0x96)
-        self.assertEqual(packed[direction_field], 0x96)
-        self.assertIn(b"\xCC\x80", packed)
-        self.assertIn(b"\xCC\xFF", packed)
+        self.assertNotIn(b"direction", packed)
         decoded = unpack_terrain_msgpack(packed)
         np.testing.assert_array_equal(decoded.values, terrain.values)
-        np.testing.assert_array_equal(decoded.direction, terrain.direction)
 
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "arena_terrain.msgpack"
             write_terrain_msgpack(path, terrain)
             loaded = load_terrain_editor_map(path)
             np.testing.assert_array_equal(loaded.values, terrain.values)
-            np.testing.assert_array_equal(loaded.direction, terrain.direction)
 
     def test_msgpack_uses_array16_and_still_reads_legacy_bin_channels(self):
         terrain = EditorMap(
             LAYER_TERRAIN,
             MapMetadata(300, 1, 0.05),
-            np.arange(300, dtype=np.uint16).astype(np.uint8) % 7,
-            np.zeros(300, dtype=np.uint8),
+            np.array([0, 1, 5, 6, 7] * 60, dtype=np.uint8),
         )
         packed = pack_terrain_msgpack(terrain)
         terrain_field = packed.index(b"terrain") + len(b"terrain")
-        direction_field = packed.index(b"direction") + len(b"direction")
         self.assertEqual(packed[terrain_field], 0xDC)
-        self.assertEqual(packed[direction_field], 0xDC)
 
         legacy = (
             b"\x85"
             b"\xA5width\xD2\x00\x00\x00\x03"
             b"\xA6height\xD2\x00\x00\x00\x02"
             b"\xAAresolution\xCB" + struct.pack(">d", 0.1) +
-            b"\xA7terrain\xC4\x06\x00\x01\x02\x03\x05\x06"
-            b"\xA9direction\xC4\x06\x00\x00\x7F\x80\xC8\xFF"
+            b"\xA7terrain\xC4\x06\x00\x01\x05\x06\x07\x00"
+            b"\xA9direction\xC4\x06\x00\x00\x7F\x00\x00\x00"
         )
         decoded = unpack_terrain_msgpack(legacy)
-        np.testing.assert_array_equal(decoded.values, [0, 1, 2, 3, 5, 6])
-        np.testing.assert_array_equal(decoded.direction, [0, 0, 127, 128, 200, 255])
+        np.testing.assert_array_equal(decoded.values, [0, 1, 5, 6, 7, 0])
 
 
 if __name__ == "__main__":

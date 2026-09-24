@@ -47,13 +47,12 @@ class MapFrameCoreTests(unittest.TestCase):
         terrain = EditorMap(
             LAYER_TERRAIN,
             MapMetadata(2, 3, 1.0),
-            np.full(6, 2, dtype=np.uint8),
-            np.full(6, 64, dtype=np.uint8),
+            np.full(6, 5, dtype=np.uint8),
         )
         write_terrain_msgpack(root / "map" / "arena_terrain.msgpack", terrain)
         return points
 
-    def test_alignment_transforms_pcd_rasters_directions_and_metadata_together(self):
+    def test_alignment_transforms_pcd_rasters_and_metadata_together(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             points = self._write_bundle(root)
@@ -75,8 +74,7 @@ class MapFrameCoreTests(unittest.TestCase):
             self.assertEqual((occupancy.metadata.width, occupancy.metadata.height), (3, 2))
             self.assertEqual((terrain.metadata.width, terrain.metadata.height), (3, 2))
             self.assertEqual(read_map_origin(root / "map" / "arena.yaml"), (0.0, -2.0, 0.0))
-            self.assertTrue(np.all(terrain.values == 2))
-            self.assertTrue(np.all(terrain.direction <= 1))
+            self.assertTrue(np.all(terrain.values == 5))
 
             metadata = json.loads((root / "map" / "arena_frame.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["source_frame"], "odom")

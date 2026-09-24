@@ -1,5 +1,10 @@
 # Change history
 
+## 2026-09-24 — 统一地形选项与导航底盘 mode
+
+- 改动：terrain 编辑器和轨迹实验室仅提供/显示平地 0、障碍 1、上坡 5、隧道 6、起伏路段 7；移除地形方向控件、箭头和方向统计。后端编辑协议与新 MessagePack 文件只含标签通道，旧文件方向字段读取时忽略、保存时移除；地图坐标变换只重采样标签。当前 `data/map/lab_map_20260921_211523_terrain.msgpack` 的 2,752 个上坡格从 2 迁到 5，与导航仓库地图及底盘 mode 对齐；隔离轨迹实验室改接 `/terrain_label_map`。
+- 验证：30 个相关 Python 单元测试、Python 编译检查、Node 语法检查与轨迹实验室 harness 通过；对照两份地图标签计数，导航 `map_server` 成功加载单通道地图；`git diff --check` 通过，网页后端已重启并在 8765 监听。未在浏览器中手工验收，也未做实车 mode 联调。
+
 ## 2026-09-23 — 轨迹实验室首次跑通：修复参数类型与海康 MVS 库遮蔽
 
 - 症状与根因（参数类型）：隔离 `nav_executor` 启动后立刻以 code 250 中止，日志为 `parameter 'planner.smac_2d.esdf_weight' has invalid type: ... is of type {double}, setting it to {integer} is not allowed`。`backend/trajectory_lab_core.py` 的 `_parameter_arguments()` 用 `f"{value:g}"` 拼 `-p` 覆盖，而 6 个可调参数里有 4 个默认值恰好是整数（`max_velocity=3.0`、`max_acceleration=4.0`、`penalty_weight_time=100.0`、`esdf_weight=1.0`），`:g` 把它们渲染成 `3`/`4`/`100`/`1`，ROS 2 便把覆盖当成 integer，与导航端声明为 double 的参数类型冲突并直接中止执行器——也就是说**任何操作者用默认滑块点“启动真实规划”都必然失败**。新增 `_format_parameter()`：整数值补上显式小数点（沿用 `terrain_core._format_origin_value` 的既有写法），六个参数连同滑块上下限现在都以 double 形式下发。已核对导航端 `planner_params.yaml` 里这 6 项确实都写成 `1.0`/`0.33`/`0.28`/`3.0`/`4.0`/`100.0`，故“一律按 double 下发”对全部六项都正确。

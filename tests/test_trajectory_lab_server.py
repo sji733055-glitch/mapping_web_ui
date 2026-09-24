@@ -82,7 +82,7 @@ def _make_lab_controller(output_root) -> MappingSupervisor:
     controller._trajectory_plan_started_at = 0.0
     controller._trajectory_global_received_at = 0.0
     controller._trajectory_minco_received_at = 0.0
-    controller._trajectory_constraints = {"free": 0, "directional": 0, "blocked": 0, "unknown": 0}
+    controller._trajectory_constraints = {"free": 0, "blocked": 0, "unknown": 0}
     controller._trajectory_cmd = {"linear_x": 0.0, "linear_y": 0.0, "angular_z": 0.0, "received": 0}
     controller._trajectory_generation = 0
     controller._trajectory_last_cloud_publish = 0.0
@@ -105,12 +105,10 @@ class TrajectorySceneGuardTests(unittest.TestCase):
     def _write_scene(self, *, yaw: float = 0.0, with_yaml: bool = True) -> Path:
         values = np.zeros(WIDTH * HEIGHT, dtype=np.uint8)
         values[OBSTACLE_CELL[1] * WIDTH + OBSTACLE_CELL[0]] = 1
-        direction = np.zeros(WIDTH * HEIGHT, dtype=np.uint8)
         editor_map = EditorMap(
             LAYER_TERRAIN,
             MapMetadata(WIDTH, HEIGHT, RESOLUTION, ORIGIN_X, ORIGIN_Y, yaw),
             values,
-            direction,
         )
         terrain_path = self.map_dir / f"{MAP_NAME}_terrain.msgpack"
         write_terrain_msgpack(terrain_path, editor_map)

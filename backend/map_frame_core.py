@@ -205,12 +205,7 @@ def _resample_map(
     source.validate()
     fill = 254 if source.layer == LAYER_OCCUPANCY else 0
     values = np.full((target.height, target.width), fill, dtype=np.uint8)
-    directions = np.zeros_like(values) if source.layer == LAYER_TERRAIN else None
     source_values = source.values.reshape(source.metadata.height, source.metadata.width)
-    source_directions = (
-        source.direction.reshape(source.metadata.height, source.metadata.width)
-        if source.direction is not None else None
-    )
     target_x = target.origin_x + (np.arange(target.width, dtype=np.float64) + 0.5) * target.resolution
     rotation_to_current = _rotation(selected_heading)
     rotation_to_source_grid = _rotation(-source.metadata.origin_yaw)
@@ -228,19 +223,9 @@ def _resample_map(
             & (source_y >= 0) & (source_y < source.metadata.height)
         )
         values[target_y, valid] = source_values[source_y[valid], source_x[valid]]
-        if directions is not None and source_directions is not None:
-            directions[target_y, valid] = source_directions[source_y[valid], source_x[valid]]
 
     flat_values = np.ascontiguousarray(values.reshape(-1))
-    flat_directions = None
-    if directions is not None:
-        directional = flat_values >= 2
-        old_angle = directions.reshape(-1).astype(np.float64) / 255.0 * (2.0 * math.pi)
-        rotated = np.mod(old_angle - selected_heading, 2.0 * math.pi)
-        encoded = np.rint(rotated / (2.0 * math.pi) * 255.0).astype(np.uint8)
-        encoded[~directional] = 0
-        flat_directions = np.ascontiguousarray(encoded)
-    result = EditorMap(source.layer, target, flat_values, flat_directions)
+    result = EditorMap(source.layer, target, flat_values)
     result.validate()
     return result
 
